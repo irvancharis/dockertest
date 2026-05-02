@@ -554,15 +554,13 @@ app.get('/', (req, res) => {
                 prodSelect.innerHTML = '<option value="">Pilih Produk...</option>';
                 
                 products.forEach(p => {
-                    prodTable.innerHTML += `
-                        <tr>
-                            <td>\${p.id}</td>
-                            <td>\${p.name}</td>
-                            <td>Rp \${parseFloat(p.price).toLocaleString()}</td>
-                            <td>\${p.stock}</td>
-                        </tr>
-                    `;
-                    prodSelect.innerHTML += `<option value="\${p.id}">\${p.name} (Stok: \${p.stock})</option>`;
+                    prodTable.innerHTML += '<tr>' +
+                        '<td>' + p.id + '</td>' +
+                        '<td>' + p.name + '</td>' +
+                        '<td>Rp ' + parseFloat(p.price).toLocaleString() + '</td>' +
+                        '<td>' + p.stock + '</td>' +
+                        '</tr>';
+                    prodSelect.innerHTML += '<option value="' + p.id + '">' + p.name + ' (Stok: ' + p.stock + ')</option>';
                 });
 
                 // Sales Table
@@ -571,14 +569,12 @@ app.get('/', (req, res) => {
                 sales.slice(0, 10).forEach(s => {
                     const statusClass = s.synced ? 'badge-sync' : 'badge-pending';
                     const statusText = s.synced ? 'Synced' : 'Pending Sync';
-                    salesTable.innerHTML += `
-                        <tr>
-                            <td style="font-family: monospace; font-size: 0.8rem;">\${s.id}</td>
-                            <td>\${new Date(s.sale_date).toLocaleString()}</td>
-                            <td>Rp \${parseFloat(s.total_amount).toLocaleString()}</td>
-                            <td><span class="badge \${statusClass}">\${statusText}</span></td>
-                        </tr>
-                    `;
+                    salesTable.innerHTML += '<tr>' +
+                        '<td style="font-family: monospace; font-size: 0.8rem;">' + s.id + '</td>' +
+                        '<td>' + new Date(s.sale_date).toLocaleString() + '</td>' +
+                        '<td>Rp ' + parseFloat(s.total_amount).toLocaleString() + '</td>' +
+                        '<td><span class="badge ' + statusClass + '">' + statusText + '</span></td>' +
+                        '</tr>';
                 });
             }
 
@@ -643,14 +639,12 @@ app.get('/', (req, res) => {
 
                 cart.forEach((item, index) => {
                     total += item.subtotal;
-                    tbody.innerHTML += `
-                        <tr>
-                            <td>\${item.name}</td>
-                            <td>\${item.quantity}</td>
-                            <td>Rp \${parseFloat(item.price).toLocaleString()}</td>
-                            <td>Rp \${item.subtotal.toLocaleString()}</td>
-                        </tr>
-                    `;
+                    tbody.innerHTML += '<tr>' +
+                        '<td>' + item.name + '</td>' +
+                        '<td>' + item.quantity + '</td>' +
+                        '<td>Rp ' + parseFloat(item.price).toLocaleString() + '</td>' +
+                        '<td>Rp ' + item.subtotal.toLocaleString() + '</td>' +
+                        '</tr>';
                 });
 
                 document.getElementById('cart-total').innerText = 'Total: Rp ' + total.toLocaleString();
