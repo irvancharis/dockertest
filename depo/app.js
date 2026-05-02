@@ -237,21 +237,23 @@ app.get('/api/sync-status', async (req, res) => {
 app.post('/api/sync-to-central', async (req, res) => {
   try {
     const depo_id = await getLocalSetting('depo_id') || 'UNKNOWN_DEPO';
+    const depo_token = await getLocalSetting('depo_token');
+    
     const [rows] = await pool.query('SELECT * FROM sales WHERE synced = 0');
-    if (rows.length === 0) {
-      return res.json({ message: 'No new data to sync' });
-    }
+    if (rows.length === 0) return res.json({ message: 'No new data to sync' });
 
-    const centralUrl = process.env.CENTRAL_URL || 'http://pusat:4000/api/receive-sync';
+    const centralUrl = (process.env.CENTRAL_URL || 'http://web-pusat:4000/api/receive-sync');
     
     const response = await fetch(centralUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 
+        'Content-Type': 'application/json',
+        'X-Depo-Token': depo_token
+      },
       body: JSON.stringify({ sales: rows.map(r => ({ ...r, depo_id })) })
     });
 
     if (response.ok) {
-      // Mark as synced
       const ids = rows.map(r => r.id);
       await pool.query('UPDATE sales SET synced = 1 WHERE id IN (?)', [ids]);
       res.json({ message: 'Sync success', count: rows.length });
@@ -260,7 +262,6 @@ app.post('/api/sync-to-central', async (req, res) => {
       throw new Error(err.error || 'Central server rejected sync');
     }
   } catch (err) {
-    console.error('Sync Error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -268,13 +269,13 @@ app.post('/api/sync-to-central', async (req, res) => {
 // API to Pull Master Data from Central
 app.post('/api/sync-products-from-central', async (req, res) => {
   try {
-    const depo_id = await getLocalSetting('depo_id') || 'UNKNOWN_DEPO';
-    // Append depo_id to query string
-    const baseUrl = (process.env.CENTRAL_URL || 'http://web-pusat:4000/api/receive-sync').replace('/receive-sync', '/products');
-    const centralUrl = `${baseUrl}?depo_id=${depo_id}`;
+    const depo_token = await getLocalSetting('depo_token');
+    const centralUrl = (process.env.CENTRAL_URL || 'http://web-pusat:4000/api/receive-sync').replace('/receive-sync', '/products');
     
     console.log('Fetching master data from:', centralUrl);
-    const response = await fetch(centralUrl);
+    const response = await fetch(centralUrl, {
+      headers: { 'X-Depo-Token': depo_token }
+    });
     if (!response.ok) throw new Error('Failed to fetch from central');
     
     const products = await response.json();
