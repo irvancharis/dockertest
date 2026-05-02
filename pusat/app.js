@@ -42,6 +42,16 @@ async function initDb() {
     `);
 
     await pool.query(`
+      CREATE TABLE IF NOT EXISTS depo_prices (
+        depo_id VARCHAR(50),
+        product_id INT,
+        price DECIMAL(10, 2),
+        PRIMARY KEY (depo_id, product_id),
+        FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+      )
+    `);
+
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS sales_central (
         id VARCHAR(36) PRIMARY KEY,
         total_amount DECIMAL(10, 2),
@@ -90,12 +100,41 @@ app.post('/api/receive-sync', async (req, res) => {
   }
 });
 
-// API to get all products (for Depo to download)
+// API to get all products (with Depo-specific price if provided)
 app.get('/api/products', async (req, res) => {
   if (!isDbReady) return res.status(503).json({ error: 'Central DB not ready' });
+  const { depo_id } = req.query;
+  
   try {
-    const [rows] = await pool.query('SELECT * FROM products');
+    let query = 'SELECT * FROM products';
+    let params = [];
+    
+    if (depo_id) {
+      // Use COALESCE to pick depo-specific price if available
+      query = `
+        SELECT p.id, p.name, COALESCE(dp.price, p.price) as price 
+        FROM products p 
+        LEFT JOIN depo_prices dp ON p.id = dp.product_id AND dp.depo_id = ?
+      `;
+      params = [depo_id];
+    }
+    
+    const [rows] = await pool.query(query, params);
     res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// API to set price for specific Depo
+app.post('/api/depo-prices', async (req, res) => {
+  const { depo_id, product_id, price } = req.body;
+  try {
+    await pool.query(
+      'INSERT INTO depo_prices (depo_id, product_id, price) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE price = VALUES(price)',
+      [depo_id, product_id, price]
+    );
+    res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -119,8 +158,10 @@ app.get('/', async (req, res) => {
   if (isDbReady) {
     const [sRows] = await pool.query('SELECT * FROM sales_central ORDER BY received_at DESC');
     const [pRows] = await pool.query('SELECT * FROM products');
+    const [dRows] = await pool.query('SELECT dp.*, p.name FROM depo_prices dp JOIN products p ON dp.product_id = p.id');
     sales = sRows;
     products = pRows;
+    depoPrices = dRows;
   }
 
   res.send(`
@@ -131,17 +172,18 @@ app.get('/', async (req, res) => {
         <style>
           :root { --primary: #6366f1; --bg: #0f172a; --card: #1e293b; --text: #f8fafc; }
           body { font-family: 'Outfit', sans-serif; background: var(--bg); color: var(--text); padding: 40px; }
-          .container { max-width: 1200px; margin: 0 auto; }
-          .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; }
+          .container { max-width: 1400px; margin: 0 auto; }
+          .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 25px; }
           .card { background: var(--card); padding: 25px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.1); }
           h1 { margin-bottom: 30px; background: linear-gradient(to right, #818cf8, #c084fc); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-          table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 0.9rem; }
-          th, td { padding: 12px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.05); }
+          table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 0.85rem; }
+          th, td { padding: 10px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.05); }
           th { color: #94a3b8; font-weight: 500; }
-          .badge { background: rgba(99, 102, 241, 0.2); color: #818cf8; padding: 4px 10px; border-radius: 99px; font-size: 0.75rem; }
-          input { background: #0f172a; border: 1px solid #334155; color: white; padding: 10px; border-radius: 8px; width: 100%; margin-bottom: 10px; }
+          .badge { background: rgba(99, 102, 241, 0.2); color: #818cf8; padding: 4px 10px; border-radius: 99px; font-size: 0.7rem; }
+          input, select { background: #0f172a; border: 1px solid #334155; color: white; padding: 10px; border-radius: 8px; width: 100%; margin-bottom: 10px; }
           button { background: var(--primary); color: white; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; width: 100%; font-weight: 600; }
           button:hover { opacity: 0.9; }
+          h2 { font-size: 1.1rem; margin-bottom: 15px; }
         </style>
       </head>
       <body>
@@ -149,34 +191,46 @@ app.get('/', async (req, res) => {
           <h1>Central Data Center</h1>
           
           <div class="grid">
-            <!-- Product Management -->
+            <!-- 1. Master Data Produk -->
             <div class="card">
-              <h2>Master Data Produk</h2>
-              <p style="color: #94a3b8; font-size: 0.8rem; margin-bottom: 20px;">Setting produk di sini untuk dikirim ke semua Depo</p>
-              
-              <div style="margin-bottom: 30px;">
-                <input type="text" id="p-name" placeholder="Nama Produk Baru">
-                <input type="number" id="p-price" placeholder="Harga Jual">
-                <button onclick="addProduct()">Tambah Produk Master</button>
+              <h2>1. Katalog Global</h2>
+              <div style="margin-bottom: 25px;">
+                <input type="text" id="p-name" placeholder="Nama Produk">
+                <input type="number" id="p-price" placeholder="Harga Default">
+                <button onclick="addProduct()">Simpan ke Katalog</button>
               </div>
-
               <table>
-                <thead>
-                  <tr><th>ID</th><th>Nama</th><th>Harga</th></tr>
-                </thead>
+                <thead><tr><th>Nama</th><th>Base Price</th></tr></thead>
                 <tbody>
-                  ${products.map(p => `<tr><td>${p.id}</td><td>${p.name}</td><td>Rp ${parseFloat(p.price).toLocaleString()}</td></tr>`).join('')}
+                  ${products.map(p => `<tr><td>${p.name}</td><td>Rp ${parseFloat(p.price).toLocaleString()}</td></tr>`).join('')}
                 </tbody>
               </table>
             </div>
 
-            <!-- Sales Monitoring -->
+            <!-- 2. Depo Pricing Overrides -->
             <div class="card">
-              <h2>Monitoring Penjualan Depo</h2>
+              <h2>2. Harga Khusus Depo</h2>
+              <div style="margin-bottom: 25px;">
+                <select id="dp-product">
+                  ${products.map(p => `<option value="${p.id}">${p.name}</option>`).join('')}
+                </select>
+                <input type="text" id="dp-depo" placeholder="ID Depo (contoh: DEPO_BALI_01)">
+                <input type="number" id="dp-price" placeholder="Harga Khusus">
+                <button onclick="setDepoPrice()" style="background: #22c55e;">Update Harga Depo</button>
+              </div>
               <table>
-                <thead>
-                  <tr><th>Depo</th><th>Total</th><th>Tanggal</th></tr>
-                </thead>
+                <thead><tr><th>Depo</th><th>Produk</th><th>Harga Khusus</th></tr></thead>
+                <tbody>
+                  ${depoPrices.map(dp => `<tr><td><span class="badge">${dp.depo_id}</span></td><td>${dp.name}</td><td>Rp ${parseFloat(dp.price).toLocaleString()}</td></tr>`).join('')}
+                </tbody>
+              </table>
+            </div>
+
+            <!-- 3. Monitoring Penjualan -->
+            <div class="card">
+              <h2>3. Monitoring Penjualan</h2>
+              <table>
+                <thead><tr><th>Depo</th><th>Total</th><th>Tanggal</th></tr></thead>
                 <tbody>
                   ${sales.map(s => `
                     <tr>
@@ -195,12 +249,24 @@ app.get('/', async (req, res) => {
           async function addProduct() {
             const name = document.getElementById('p-name').value;
             const price = document.getElementById('p-price').value;
-            if(!name || !price) return alert('Isi semua data');
-            
             const res = await fetch('/api/products', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ name, price })
+            });
+            if(res.ok) location.reload();
+          }
+
+          async function setDepoPrice() {
+            const product_id = document.getElementById('dp-product').value;
+            const depo_id = document.getElementById('dp-depo').value;
+            const price = document.getElementById('dp-price').value;
+            if(!depo_id || !price) return alert('Lengkapi data');
+
+            const res = await fetch('/api/depo-prices', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ depo_id, product_id, price })
             });
             if(res.ok) location.reload();
           }
