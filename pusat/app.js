@@ -172,12 +172,12 @@ app.get('/api/check-token', async (req, res) => {
 
 // API to manage depos from Pusat
 app.post('/api/depos', async (req, res) => {
-  const { depo_id, name, db_user, db_pass, admin_user, admin_pass } = req.body;
+  const { depo_id, name, db_user, db_pass, admin_user, admin_pass, ip_address } = req.body;
   const token = require('crypto').randomBytes(16).toString('hex'); // Generate unique token
   try {
     await pool.query(
-      'INSERT INTO depos_master (depo_id, name, token, db_user, db_pass, admin_user, admin_pass) VALUES (?, ?, ?, ?, ?, ?, ?)', 
-      [depo_id, name, token, db_user, db_pass, admin_user, admin_pass]
+      'INSERT INTO depos_master (depo_id, name, token, db_user, db_pass, admin_user, admin_pass, last_ip) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', 
+      [depo_id, name, token, db_user, db_pass, admin_user, admin_pass, ip_address]
     );
     res.json({ success: true, token });
   } catch (err) {
@@ -282,6 +282,7 @@ app.get('/', async (req, res) => {
                 <input type="text" id="m-dbpass" placeholder="MySQL Pass">
                 <input type="text" id="m-adminuser" placeholder="Admin Login">
                 <input type="text" id="m-adminpass" placeholder="Admin Pass">
+                <input type="text" id="m-ip" placeholder="IP Server Depo (Optional)">
                 <button onclick="registerDepo()" style="grid-column: span 2; background: #ec4899;">Register & Generate Token</button>
               </div>
               <table>
@@ -359,13 +360,14 @@ app.get('/', async (req, res) => {
             const db_pass = document.getElementById('m-dbpass').value;
             const admin_user = document.getElementById('m-adminuser').value;
             const admin_pass = document.getElementById('m-adminpass').value;
+            const ip_address = document.getElementById('m-ip').value;
 
             if(!depo_id || !name || !db_user || !db_pass) return alert('Lengkapi data Depo & DB');
             
             const res = await fetch('/api/depos', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ depo_id, name, db_user, db_pass, admin_user, admin_pass })
+              body: JSON.stringify({ depo_id, name, db_user, db_pass, admin_user, admin_pass, ip_address })
             });
             if(res.ok) location.reload();
           }
