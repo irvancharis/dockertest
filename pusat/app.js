@@ -64,9 +64,10 @@ app.post('/api/receive-sync', async (req, res) => {
     await connection.beginTransaction();
 
     for (const sale of sales) {
+      const formattedDate = new Date(sale.sale_date).toISOString().slice(0, 19).replace('T', ' ');
       await connection.query(
-        'INSERT INTO sales_central (id, total_amount, sale_date, depo_id) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE total_amount = VALUES(total_amount)',
-        [sale.id, sale.total_amount, sale.sale_date, sale.depo_id]
+        'INSERT INTO sales_central (id, total_amount, sale_date, depo_id) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE total_amount = VALUES(total_amount), sale_date = VALUES(sale_date)',
+        [sale.id, sale.total_amount, formattedDate, sale.depo_id]
       );
     }
 
