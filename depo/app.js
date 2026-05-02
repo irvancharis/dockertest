@@ -81,6 +81,13 @@ async function initDb() {
       )
     `);
 
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS settings (
+        setting_key VARCHAR(50) PRIMARY KEY,
+        setting_value TEXT
+      )
+    `);
+
     isDbReady = true;
     console.log('Database and tables initialized successfully');
   } catch (err) {
@@ -91,6 +98,42 @@ async function initDb() {
 }
 
 initDb();
+
+// Helper to get local setting
+async function getLocalSetting(key) {
+  try {
+    const [rows] = await pool.query('SELECT setting_value FROM settings WHERE setting_key = ?', [key]);
+    return rows.length > 0 ? rows[0].setting_value : process.env[key.toUpperCase()];
+  } catch (e) { return process.env[key.toUpperCase()]; }
+}
+
+// API to check activation status
+app.get('/api/config', async (req, res) => {
+  const depo_id = await getLocalSetting('depo_id');
+  const depo_name = await getLocalSetting('depo_name');
+  res.json({ activated: !!depo_id, depo_id, depo_name });
+});
+
+// API to Activate Depo with Token
+app.post('/api/activate', async (req, res) => {
+  const { token } = req.body;
+  const centralBaseUrl = (process.env.CENTRAL_URL || 'http://web-pusat:4000/api/receive-sync').replace('/api/receive-sync', '');
+  
+  try {
+    const response = await fetch(`${centralBaseUrl}/api/check-token?token=${token}`);
+    if (!response.ok) throw new Error('Token tidak valid');
+    
+    const data = await response.json(); // { depo_id, name }
+    
+    await pool.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['depo_id', data.depo_id]);
+    await pool.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['depo_name', data.name]);
+    await pool.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['depo_token', token]);
+    
+    res.json({ success: true, depo_id: data.depo_id, name: data.name });
+  } catch (err) {
+    res.status(401).json({ error: err.message });
+  }
+});
 
 // Middleware to check DB readiness
 app.use('/api', (req, res, next) => {
@@ -130,7 +173,7 @@ app.post('/api/products', async (req, res) => {
 app.post('/api/sales', async (req, res) => {
   const { items, total_amount } = req.body;
   const saleId = crypto.randomUUID();
-  const depoId = process.env.DEPO_ID || 'UNKNOWN_DEPO';
+  const depoId = await getLocalSetting('depo_id') || 'UNKNOWN_DEPO';
 
   const connection = await pool.getConnection();
   try {
@@ -177,12 +220,13 @@ app.get('/api/sales', async (req, res) => {
 // Get Sync Status
 app.get('/api/sync-status', async (req, res) => {
   try {
+    const depo_id = await getLocalSetting('depo_id') || 'UNKNOWN_DEPO';
     const [total] = await pool.query('SELECT COUNT(*) as count FROM sales');
     const [unsynced] = await pool.query('SELECT COUNT(*) as count FROM sales WHERE synced = 0');
     res.json({
       total: total[0].count,
       unsynced: unsynced[0].count,
-      depo_id: process.env.DEPO_ID || 'UNKNOWN_DEPO'
+      depo_id: depo_id
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -192,6 +236,7 @@ app.get('/api/sync-status', async (req, res) => {
 // API Route for Syncing to Central
 app.post('/api/sync-to-central', async (req, res) => {
   try {
+    const depo_id = await getLocalSetting('depo_id') || 'UNKNOWN_DEPO';
     const [rows] = await pool.query('SELECT * FROM sales WHERE synced = 0');
     if (rows.length === 0) {
       return res.json({ message: 'No new data to sync' });
@@ -202,7 +247,7 @@ app.post('/api/sync-to-central', async (req, res) => {
     const response = await fetch(centralUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sales: rows })
+      body: JSON.stringify({ sales: rows.map(r => ({ ...r, depo_id })) })
     });
 
     if (response.ok) {
@@ -223,10 +268,10 @@ app.post('/api/sync-to-central', async (req, res) => {
 // API to Pull Master Data from Central
 app.post('/api/sync-products-from-central', async (req, res) => {
   try {
-    const depoId = process.env.DEPO_ID || 'UNKNOWN_DEPO';
+    const depo_id = await getLocalSetting('depo_id') || 'UNKNOWN_DEPO';
     // Append depo_id to query string
     const baseUrl = (process.env.CENTRAL_URL || 'http://web-pusat:4000/api/receive-sync').replace('/receive-sync', '/products');
-    const centralUrl = `${baseUrl}?depo_id=${depoId}`;
+    const centralUrl = `${baseUrl}?depo_id=${depo_id}`;
     
     console.log('Fetching master data from:', centralUrl);
     const response = await fetch(centralUrl);
@@ -289,6 +334,28 @@ app.get('/', (req, res) => {
                 color: var(--text);
                 min-height: 100vh;
                 display: flex;
+            }
+
+            /* Activation Overlay */
+            #activation-overlay {
+                position: fixed;
+                inset: 0;
+                background: var(--bg);
+                z-index: 9999;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 20px;
+            }
+            .activation-card {
+                background: var(--card-bg);
+                border: 1px solid var(--glass-border);
+                padding: 3rem;
+                border-radius: 24px;
+                max-width: 450px;
+                width: 100%;
+                text-align: center;
+                backdrop-filter: blur(20px);
             }
 
             /* Sidebar */
@@ -437,21 +504,48 @@ app.get('/', (req, res) => {
         </style>
     </head>
     <body>
-        <div class="sidebar">
-            <div class="logo">DEPO CORE</div>
-            <div class="nav-item active" onclick="showSection('dashboard')">Dashboard</div>
-            <div class="nav-item" onclick="showSection('inventory')">Inventory</div>
-            <div class="nav-item" onclick="showSection('sales')">Sales Transaksi</div>
-            <div class="nav-item" onclick="syncData()">Force Sync</div>
+        <!-- Activation Overlay -->
+        <div id="activation-overlay" style="display: none;">
+            <div class="activation-card">
+                <div style="background: rgba(99, 102, 241, 0.1); width: 80px; height: 80px; border-radius: 20px; display: flex; align-items: center; justify-content: center; margin: 0 auto 1.5rem;">
+                    <i data-lucide="shield-check" style="width: 40px; height: 40px; color: var(--primary);"></i>
+                </div>
+                <h1 style="margin-bottom: 0.5rem; font-size: 1.5rem;">Aktivasi Server Depo</h1>
+                <p style="color: var(--text-muted); margin-bottom: 2rem; font-size: 0.9rem;">Server ini belum terdaftar. Masukkan Token Access dari Dashboard Pusat untuk memulai.</p>
+                <input type="text" id="activation-token" placeholder="Masukkan Token Anda" style="text-align: center; font-family: monospace; letter-spacing: 1px; border: 1px solid var(--primary);">
+                <button class="btn" onclick="activateApp()" style="width: 100%; justify-content: center; padding: 15px;">Aktifkan Sekarang</button>
+                <p style="margin-top: 1.5rem; font-size: 0.75rem; color: var(--text-muted);">Sistem akan otomatis mengunduh profil & harga khusus untuk Depo ini.</p>
+            </div>
         </div>
+
+        <nav class="sidebar">
+            <div class="logo">
+                <i data-lucide="layers"></i> DEPO CORE
+            </div>
+            <div class="nav-item active" onclick="showSection('dashboard')">
+                <i data-lucide="layout-dashboard"></i> Dashboard
+            </div>
+            <div class="nav-item" onclick="showSection('inventory')">
+                <i data-lucide="package"></i> Inventory
+            </div>
+            <div class="nav-item" onclick="showSection('sales')">
+                <i data-lucide="shopping-cart"></i> Sales Transaksi
+            </div>
+            <div class="nav-item" onclick="syncData()">
+                <i data-lucide="refresh-cw"></i> Force Sync
+            </div>
+        </nav>
 
         <div class="main">
             <header>
                 <div>
                     <h1 id="page-title">Dashboard</h1>
-                    <p id="depo-name" style="color: var(--text-muted)">ID Depo: Loading...</p>
+                    <p id="depo-display-name" style="color: var(--primary); font-weight: 600; font-size: 1.1rem; margin-top: 4px;">Loading Cabang...</p>
+                    <p id="depo-id-label" style="color: var(--text-muted); font-size: 0.8rem;">ID: ...</p>
                 </div>
-                <div class="btn" onclick="showSection('sales')">+ Transaksi Baru</div>
+                <div class="btn" onclick="showSection('sales')">
+                    <i data-lucide="plus"></i> Transaksi Baru
+                </div>
             </header>
 
             <div id="section-dashboard">
@@ -515,10 +609,10 @@ app.get('/', (req, res) => {
             <div id="section-sales" style="display: none;">
                 <div class="glass-panel">
                     <h2>Input Penjualan</h2>
-                    <div id="sale-form">
-                        <select id="sale-product-select"></select>
-                        <input type="number" id="sale-qty" placeholder="Jumlah">
-                        <button class="btn" onclick="addToCart()">Tambah ke Keranjang</button>
+                    <div id="sale-form" style="display: flex; gap: 10px;">
+                        <select id="sale-product-select" style="flex: 2; margin-bottom: 0;"></select>
+                        <input type="number" id="sale-qty" placeholder="Jumlah" style="flex: 1; margin-bottom: 0;">
+                        <button class="btn" onclick="addToCart()" style="flex: 1;">Tambah</button>
                     </div>
                     
                     <div style="margin-top: 2rem;">
@@ -551,66 +645,83 @@ app.get('/', (req, res) => {
 
             async function fetchData() {
                 try {
+                    // Check activation first
+                    const configRes = await fetch('/api/config');
+                    const config = await configRes.json();
+                    
+                    if (!config.activated) {
+                        document.getElementById('activation-overlay').style.display = 'flex';
+                        return;
+                    }
+
+                    document.getElementById('activation-overlay').style.display = 'none';
+                    document.getElementById('depo-display-name').innerText = config.depo_name;
+                    document.getElementById('depo-id-label').innerText = 'ID: ' + config.depo_id;
+
                     const [prodRes, salesRes, syncRes] = await Promise.all([
                         fetch('/api/products'),
                         fetch('/api/sales'),
                         fetch('/api/sync-status')
                     ]);
 
-                    if (!prodRes.ok || !salesRes.ok || !syncRes.ok) {
-                        const errData = await syncRes.json();
-                        throw new Error(errData.error || 'Server is starting up...');
-                    }
-
                     products = await prodRes.json();
                     const sales = await salesRes.json();
                     const syncStatus = await syncRes.json();
 
                     updateUI(products, sales, syncStatus);
+                    lucide.createIcons(); // Refresh icons
                 } catch (err) {
                     console.error(err);
-                    notify(err.message, 'warning');
-                    // Set default UI state if DB not ready
-                    document.getElementById('depo-name').innerText = 'ID Depo: Connecting...';
+                    notify('Gagal mengambil data', 'danger');
+                }
+            }
+
+            async function activateApp() {
+                const token = document.getElementById('activation-token').value;
+                if (!token) return alert('Masukkan Token');
+                
+                notify('Menghubungi Pusat...', 'warning');
+                try {
+                    const res = await fetch('/api/activate', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ token })
+                    });
+                    const data = await res.json();
+                    if (res.ok) {
+                        notify('Aktivasi Berhasil! Selamat Datang ' + data.name, 'success');
+                        setTimeout(() => location.reload(), 2000);
+                    } else {
+                        throw new Error(data.error);
+                    }
+                } catch (err) {
+                    notify('Aktivasi Gagal: ' + err.message, 'danger');
                 }
             }
 
             function updateUI(products, sales, syncStatus) {
-                document.getElementById('depo-name').innerText = 'ID Depo: ' + syncStatus.depo_id;
                 document.getElementById('stat-products').innerText = products.length;
                 document.getElementById('stat-pending-sync').innerText = syncStatus.unsynced;
                 
                 const totalSales = sales.reduce((acc, s) => acc + parseFloat(s.total_amount), 0);
                 document.getElementById('stat-total-sales').innerText = 'Rp ' + totalSales.toLocaleString();
 
-                // Products Table & Select
                 const prodTable = document.querySelector('#products-table tbody');
                 const prodSelect = document.getElementById('sale-product-select');
                 prodTable.innerHTML = '';
                 prodSelect.innerHTML = '<option value="">Pilih Produk...</option>';
                 
                 products.forEach(p => {
-                    prodTable.innerHTML += '<tr>' +
-                        '<td>' + p.id + '</td>' +
-                        '<td>' + p.name + '</td>' +
-                        '<td>Rp ' + parseFloat(p.price).toLocaleString() + '</td>' +
-                        '<td>' + p.stock + '</td>' +
-                        '</tr>';
-                    prodSelect.innerHTML += '<option value="' + p.id + '">' + p.name + ' (Stok: ' + p.stock + ')</option>';
+                    prodTable.innerHTML += `<tr><td>${p.id}</td><td>${p.name}</td><td>Rp ${parseFloat(p.price).toLocaleString()}</td><td>${p.stock}</td></tr>`;
+                    prodSelect.innerHTML += `<option value="${p.id}">${p.name} (Stok: ${p.stock})</option>`;
                 });
 
-                // Sales Table
                 const salesTable = document.querySelector('#sales-table tbody');
                 salesTable.innerHTML = '';
                 sales.slice(0, 10).forEach(s => {
                     const statusClass = s.synced ? 'badge-sync' : 'badge-pending';
-                    const statusText = s.synced ? 'Synced' : 'Pending Sync';
-                    salesTable.innerHTML += '<tr>' +
-                        '<td style="font-family: monospace; font-size: 0.8rem;">' + s.id + '</td>' +
-                        '<td>' + new Date(s.sale_date).toLocaleString() + '</td>' +
-                        '<td>Rp ' + parseFloat(s.total_amount).toLocaleString() + '</td>' +
-                        '<td><span class="badge ' + statusClass + '">' + statusText + '</span></td>' +
-                        '</tr>';
+                    const statusText = s.synced ? 'Synced' : 'Pending';
+                    salesTable.innerHTML += `<tr><td style="font-family: monospace; font-size: 0.75rem;">${s.id}</td><td>${new Date(s.sale_date).toLocaleString()}</td><td>Rp ${parseFloat(s.total_amount).toLocaleString()}</td><td><span class="badge ${statusClass}">${statusText}</span></td></tr>`;
                 });
             }
 
@@ -619,8 +730,6 @@ app.get('/', (req, res) => {
                     document.getElementById('section-' + s).style.display = s === name ? 'block' : 'none';
                 });
                 document.getElementById('page-title').innerText = name.charAt(0).toUpperCase() + name.slice(1);
-                
-                // Update active nav
                 document.querySelectorAll('.nav-item').forEach(item => {
                     item.classList.remove('active');
                     if (item.innerText.toLowerCase().includes(name)) item.classList.add('active');
@@ -647,18 +756,10 @@ app.get('/', (req, res) => {
                 const prodId = document.getElementById('sale-product-select').value;
                 const qty = parseInt(document.getElementById('sale-qty').value);
                 const product = products.find(p => p.id == prodId);
-
                 if (!product || !qty || qty <= 0) return notify('Pilih produk dan jumlah yang valid', 'warning');
                 if (qty > product.stock) return notify('Stok tidak mencukupi', 'danger');
 
-                cart.push({
-                    product_id: product.id,
-                    name: product.name,
-                    quantity: qty,
-                    price: product.price,
-                    subtotal: product.price * qty
-                });
-
+                cart.push({ product_id: product.id, name: product.name, quantity: qty, price: product.price, subtotal: product.price * qty });
                 updateCartUI();
             }
 
@@ -666,52 +767,39 @@ app.get('/', (req, res) => {
                 const tbody = document.querySelector('#cart-table tbody');
                 tbody.innerHTML = '';
                 let total = 0;
-
-                cart.forEach((item, index) => {
+                cart.forEach(item => {
                     total += item.subtotal;
-                    tbody.innerHTML += '<tr>' +
-                        '<td>' + item.name + '</td>' +
-                        '<td>' + item.quantity + '</td>' +
-                        '<td>Rp ' + parseFloat(item.price).toLocaleString() + '</td>' +
-                        '<td>Rp ' + item.subtotal.toLocaleString() + '</td>' +
-                        '</tr>';
+                    tbody.innerHTML += `<tr><td>${item.name}</td><td>${item.quantity}</td><td>Rp ${parseFloat(item.price).toLocaleString()}</td><td>Rp ${item.subtotal.toLocaleString()}</td></tr>`;
                 });
-
                 document.getElementById('cart-total').innerText = 'Total: Rp ' + total.toLocaleString();
             }
 
             async function checkout() {
                 if (cart.length === 0) return notify('Keranjang kosong', 'warning');
-
                 const total = cart.reduce((acc, item) => acc + item.subtotal, 0);
                 const res = await fetch('/api/sales', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ items: cart, total_amount: total })
                 });
-
                 if (res.ok) {
                     notify('Transaksi Berhasil!', 'success');
-                    cart = [];
-                    updateCartUI();
-                    fetchData();
-                    showSection('dashboard');
+                    cart = []; updateCartUI(); fetchData(); showSection('dashboard');
                 } else {
                     notify('Gagal memproses transaksi', 'danger');
                 }
             }
 
             async function syncData() {
-                notify('Sinkronisasi ke pusat dimulai...', 'warning');
+                notify('Sinkronisasi ke pusat...', 'warning');
                 try {
                     const res = await fetch('/api/sync-to-central', { method: 'POST' });
                     const data = await res.json();
-                    
                     if (res.ok) {
                         notify('Sukses: ' + (data.count || 0) + ' data tersinkronisasi', 'success');
                         fetchData();
                     } else {
-                        throw new Error(data.error || 'Koneksi ke pusat gagal');
+                        throw new Error(data.error || 'Gagal');
                     }
                 } catch (err) {
                     notify('Gagal: ' + err.message, 'danger');
@@ -722,15 +810,12 @@ app.get('/', (req, res) => {
                 const n = document.getElementById('notification');
                 n.innerText = msg;
                 n.style.display = 'block';
-                n.style.background = type === 'success' ? 'var(--success)' : 
-                                   type === 'danger' ? 'var(--danger)' : 
-                                   type === 'warning' ? 'var(--warning)' : 'var(--primary)';
+                n.style.background = type === 'success' ? 'var(--success)' : type === 'danger' ? 'var(--danger)' : type === 'warning' ? 'var(--warning)' : 'var(--primary)';
                 setTimeout(() => n.style.display = 'none', 3000);
             }
 
-            // Initial fetch
+            lucide.createIcons();
             fetchData();
-            // Refresh every 30 seconds
             setInterval(fetchData, 30000);
         </script>
     </body>
