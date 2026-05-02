@@ -13,7 +13,7 @@ services:
       - db_data:/var/lib/mysql
 
   web:
-    build: .
+    build: ./depo
     ports:
       - "3000:3000"
     container_name: depo-app
@@ -24,8 +24,7 @@ services:
       DB_USER: root
       DB_PASS: rootpassword
       DB_NAME: depo_db
-      DEPO_ID: "DEPO_BALI_01"
-      CENTRAL_URL: "http://IP_SERVER_PUSAT:4000/api/receive-sync"
+      CENTRAL_URL: "http://192.168.3.190:4000/api/receive-sync" # Sesuaikan IP Pusat Anda
     restart: always
 
 volumes:
