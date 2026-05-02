@@ -556,13 +556,13 @@ app.get('/', (req, res) => {
                 products.forEach(p => {
                     prodTable.innerHTML += `
                         <tr>
-                            <td>${p.id}</td>
-                            <td>${p.name}</td>
-                            <td>Rp ${parseFloat(p.price).toLocaleString()}</td>
-                            <td>${p.stock}</td>
+                            <td>\${p.id}</td>
+                            <td>\${p.name}</td>
+                            <td>Rp \${parseFloat(p.price).toLocaleString()}</td>
+                            <td>\${p.stock}</td>
                         </tr>
                     `;
-                    prodSelect.innerHTML += `<option value="${p.id}">${p.name} (Stok: ${p.stock})</option>`;
+                    prodSelect.innerHTML += `<option value="\${p.id}">\${p.name} (Stok: \${p.stock})</option>`;
                 });
 
                 // Sales Table
@@ -573,10 +573,10 @@ app.get('/', (req, res) => {
                     const statusText = s.synced ? 'Synced' : 'Pending Sync';
                     salesTable.innerHTML += `
                         <tr>
-                            <td style="font-family: monospace; font-size: 0.8rem;">${s.id}</td>
-                            <td>${new Date(s.sale_date).toLocaleString()}</td>
-                            <td>Rp ${parseFloat(s.total_amount).toLocaleString()}</td>
-                            <td><span class="badge ${statusClass}">${statusText}</span></td>
+                            <td style="font-family: monospace; font-size: 0.8rem;">\${s.id}</td>
+                            <td>\${new Date(s.sale_date).toLocaleString()}</td>
+                            <td>Rp \${parseFloat(s.total_amount).toLocaleString()}</td>
+                            <td><span class="badge \${statusClass}">\${statusText}</span></td>
                         </tr>
                     `;
                 });
@@ -645,10 +645,10 @@ app.get('/', (req, res) => {
                     total += item.subtotal;
                     tbody.innerHTML += `
                         <tr>
-                            <td>${item.name}</td>
-                            <td>${item.quantity}</td>
-                            <td>Rp ${parseFloat(item.price).toLocaleString()}</td>
-                            <td>Rp ${item.subtotal.toLocaleString()}</td>
+                            <td>\${item.name}</td>
+                            <td>\${item.quantity}</td>
+                            <td>Rp \${parseFloat(item.price).toLocaleString()}</td>
+                            <td>Rp \${item.subtotal.toLocaleString()}</td>
                         </tr>
                     `;
                 });
