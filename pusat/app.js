@@ -56,15 +56,24 @@ async function initDb() {
         depo_id VARCHAR(50) PRIMARY KEY,
         name VARCHAR(100) NOT NULL,
         token VARCHAR(100) UNIQUE NOT NULL,
-        db_user VARCHAR(50),
-        db_pass VARCHAR(50),
-        admin_user VARCHAR(50),
-        admin_pass VARCHAR(50),
         status VARCHAR(20) DEFAULT 'Active',
-        last_ip VARCHAR(50),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+
+    // Schema Migration: Add columns if they don't exist (for existing databases)
+    const addColumn = async (table, col, type) => {
+      try {
+        await pool.query(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
+        console.log(`Added column ${col} to ${table}`);
+      } catch (e) { /* Column likely exists */ }
+    };
+
+    await addColumn('depos_master', 'db_user', 'VARCHAR(50)');
+    await addColumn('depos_master', 'db_pass', 'VARCHAR(50)');
+    await addColumn('depos_master', 'admin_user', 'VARCHAR(50)');
+    await addColumn('depos_master', 'admin_pass', 'VARCHAR(50)');
+    await addColumn('depos_master', 'last_ip', 'VARCHAR(50)');
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS sales_central (
