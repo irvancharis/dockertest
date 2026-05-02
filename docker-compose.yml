@@ -1,60 +1,30 @@
 version: '3.8'
 
 services:
-  # === SYSTEM DEPO ===
-  db-depo:
-    image: mysql:8.0
-    restart: always
-    environment:
-      MYSQL_DATABASE: depo_db
-      MYSQL_ROOT_PASSWORD: rootpassword
-    ports:
-      - "3306:3306"
-    volumes:
-      - db_depo_data:/var/lib/mysql
-
-  web-depo:
-    build: ./depo
-    ports:
-      - "3000:3000"
-    container_name: depo-app
-    depends_on:
-      - db-depo
-    environment:
-      DB_HOST: db-depo
-      DB_USER: root
-      DB_PASS: rootpassword
-      DB_NAME: depo_db
-      DEPO_ID: "DEPO_BALI_01"
-      CENTRAL_URL: "http://web-pusat:4000/api/receive-sync"
-    restart: always
-
-  # === SYSTEM PUSAT ===
-  db-pusat:
+  db:
     image: mysql:8.0
     restart: always
     environment:
       MYSQL_DATABASE: pusat_db
       MYSQL_ROOT_PASSWORD: rootpassword
     ports:
-      - "3307:3306"
+      - "3306:3306"
     volumes:
-      - db_pusat_data:/var/lib/mysql
+      - db_data:/var/lib/mysql
 
-  web-pusat:
-    build: ./pusat
+  web:
+    build: .
     ports:
       - "4000:4000"
     container_name: pusat-app
     depends_on:
-      - db-pusat
+      - db
     environment:
-      DB_HOST: db-pusat
+      DB_HOST: db
       DB_USER: root
       DB_PASS: rootpassword
       DB_NAME: pusat_db
     restart: always
 
 volumes:
-  db_depo_data:
-  db_pusat_data:
+  db_data:
