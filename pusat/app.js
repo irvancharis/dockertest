@@ -81,12 +81,29 @@ async function initDb() {
 
 initDb();
 
+// Middleware to verify Depo Token for security
+async function checkDepoToken(req, res, next) {
+  const token = req.headers['x-depo-token'];
+  if (!token) return res.status(401).json({ error: 'Token diperlukan (X-Depo-Token)' });
+  
+  try {
+    const [rows] = await pool.query('SELECT * FROM depos_master WHERE token = ? AND status = "Active"', [token]);
+    if (rows.length === 0) return res.status(403).json({ error: 'Token tidak valid atau Depo dinonaktifkan' });
+    req.depo = rows[0]; // Attach depo info to request
+    next();
+  } catch (err) {
+    res.status(500).json({ error: 'Security check failed' });
+  }
+}
+
 // API to receive sync from Depo
-app.post('/api/receive-sync', async (req, res) => {
+app.post('/api/receive-sync', checkDepoToken, async (req, res) => {
   if (!isDbReady) return res.status(503).json({ error: 'Central DB not ready' });
   
   const { sales } = req.body;
-  console.log(`Received sync from Depo. Total records: ${sales.length}`);
+  const depo_id = req.depo.depo_id; // Use ID from validated token
+  
+  console.log(`Received sync from Depo ${depo_id}. Total records: ${sales.length}`);
 
   const connection = await pool.getConnection();
   try {
@@ -111,25 +128,19 @@ app.post('/api/receive-sync', async (req, res) => {
 });
 
 // API to get all products (with Depo-specific price if provided)
-app.get('/api/products', async (req, res) => {
+app.get('/api/products', checkDepoToken, async (req, res) => {
   if (!isDbReady) return res.status(503).json({ error: 'Central DB not ready' });
-  const { depo_id } = req.query;
+  const depo_id = req.depo.depo_id; // Derived from verified token
   
   try {
-    let query = 'SELECT * FROM products';
-    let params = [];
+    // Use COALESCE to pick depo-specific price if available
+    const query = `
+      SELECT p.id, p.name, COALESCE(dp.price, p.price) as price 
+      FROM products p 
+      LEFT JOIN depo_prices dp ON p.id = dp.product_id AND dp.depo_id = ?
+    `;
     
-    if (depo_id) {
-      // Use COALESCE to pick depo-specific price if available
-      query = `
-        SELECT p.id, p.name, COALESCE(dp.price, p.price) as price 
-        FROM products p 
-        LEFT JOIN depo_prices dp ON p.id = dp.product_id AND dp.depo_id = ?
-      `;
-      params = [depo_id];
-    }
-    
-    const [rows] = await pool.query(query, params);
+    const [rows] = await pool.query(query, [depo_id]);
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
