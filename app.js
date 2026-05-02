@@ -20,21 +20,34 @@ const dbConfig = {
   database: process.env.DB_NAME || 'depo_db',
 };
 
-// Create pool immediately so it's defined even if connection fails initially
-const pool = mysql.createPool(dbConfig);
+// Global pool variable
+let pool;
+let isDbReady = false;
 
 async function initDb() {
   try {
-    // Create connection without database to ensure DB exists
+    console.log('Connecting to MySQL host...');
+    // Create connection without database first to ensure DB exists
     const connection = await mysql.createConnection({
       host: dbConfig.host,
       user: dbConfig.user,
       password: dbConfig.password,
     });
+    
+    console.log('Creating database if not exists...');
     await connection.query(`CREATE DATABASE IF NOT EXISTS ${dbConfig.database}`);
     await connection.end();
 
+    // Now create the pool with the database specified
+    pool = mysql.createPool({
+      ...dbConfig,
+      waitForConnections: true,
+      connectionLimit: 10,
+      queueLimit: 0
+    });
+
     // Initialize tables
+    console.log('Initializing tables...');
     await pool.query(`
       CREATE TABLE IF NOT EXISTS products (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -68,19 +81,22 @@ async function initDb() {
       )
     `);
 
-    console.log('Database initialized successfully');
+    isDbReady = true;
+    console.log('Database and tables initialized successfully');
   } catch (err) {
-    console.error('Error initializing database:', err.message);
-    // Retry connection after 5 seconds
+    console.error('Database initialization failed:', err.message);
+    console.log('Retrying in 5 seconds...');
     setTimeout(initDb, 5000);
   }
 }
 
 initDb();
 
-// Middleware to check DB readiness (optional but helpful)
+// Middleware to check DB readiness
 app.use('/api', (req, res, next) => {
-  if (!pool) return res.status(503).json({ error: 'Database service not ready' });
+  if (!isDbReady) {
+    return res.status(503).json({ error: 'Database is still initializing, please try again in a few seconds.' });
+  }
   next();
 });
 
@@ -474,13 +490,21 @@ app.get('/', (req, res) => {
                         fetch('/api/sync-status')
                     ]);
 
+                    if (!prodRes.ok || !salesRes.ok || !syncRes.ok) {
+                        const errData = await syncRes.json();
+                        throw new Error(errData.error || 'Server is starting up...');
+                    }
+
                     products = await prodRes.json();
                     const sales = await salesRes.json();
                     const syncStatus = await syncRes.json();
 
                     updateUI(products, sales, syncStatus);
                 } catch (err) {
-                    notify('Gagal mengambil data: ' + err.message, 'danger');
+                    console.error(err);
+                    notify(err.message, 'warning');
+                    // Set default UI state if DB not ready
+                    document.getElementById('depo-name').innerText = 'ID Depo: Connecting...';
                 }
             }
 
