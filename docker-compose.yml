@@ -13,7 +13,7 @@ services:
       - db_data:/var/lib/mysql
 
   web:
-    build: ./depo
+    build: .
     ports:
       - "3000:3000"
     container_name: depo-app

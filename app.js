@@ -3,6 +3,7 @@ const mysql = require('mysql2/promise');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const crypto = require('crypto');
+const cookieParser = require('cookie-parser');
 require('dotenv').config();
 
 const app = express();
@@ -10,6 +11,7 @@ const port = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(bodyParser.json());
+app.use(cookieParser('secret-key')); // Simple secret for cookies
 app.use(express.static('public'));
 
 // Database configuration
@@ -81,6 +83,13 @@ async function initDb() {
       )
     `);
 
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS settings (
+        setting_key VARCHAR(50) PRIMARY KEY,
+        setting_value TEXT
+      )
+    `);
+
     isDbReady = true;
     console.log('Database and tables initialized successfully');
   } catch (err) {
@@ -91,6 +100,90 @@ async function initDb() {
 }
 
 initDb();
+
+// Helper to get local setting
+async function getLocalSetting(key) {
+  try {
+    const [rows] = await pool.query('SELECT setting_value FROM settings WHERE setting_key = ?', [key]);
+    return rows.length > 0 ? rows[0].setting_value : process.env[key.toUpperCase()];
+  } catch (e) { return process.env[key.toUpperCase()]; }
+}
+
+// API to check activation status
+app.get('/api/config', async (req, res) => {
+  const depo_id = await getLocalSetting('depo_id');
+  const depo_name = await getLocalSetting('depo_name');
+  res.json({ activated: !!depo_id, depo_id, depo_name });
+});
+
+// API to Activate Depo with Token
+app.post('/api/activate', async (req, res) => {
+  const { token } = req.body;
+  const centralBaseUrl = (process.env.CENTRAL_URL || 'http://web-pusat:4000/api/receive-sync').replace('/api/receive-sync', '');
+  
+  try {
+    const response = await fetch(`${centralBaseUrl}/api/check-token?token=${token}`);
+    if (!response.ok) throw new Error('Token tidak valid');
+    
+    const data = await response.json(); // { depo_id, name, db_user, db_pass, admin_user, admin_pass }
+    
+    // 1. Setup local MySQL User
+    if (data.db_user && data.db_pass) {
+      console.log('Provisioning local MySQL user:', data.db_user);
+      const conn = await pool.getConnection();
+      try {
+        await conn.query(`CREATE USER IF NOT EXISTS '${data.db_user}'@'%' IDENTIFIED BY '${data.db_pass}'`);
+        await conn.query(`GRANT ALL PRIVILEGES ON ${dbConfig.database}.* TO '${data.db_user}'@'%'`);
+        await conn.query('FLUSH PRIVILEGES');
+      } finally { conn.release(); }
+    }
+
+    // 2. Save settings locally
+    await pool.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['depo_id', data.depo_id]);
+    await pool.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['depo_name', data.name]);
+    await pool.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['depo_token', token]);
+    await pool.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['db_user', data.db_user]);
+    await pool.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['db_pass', data.db_pass]);
+    await pool.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['admin_user', data.admin_user]);
+    await pool.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['admin_pass', data.admin_pass]);
+    
+    res.json({ success: true, message: 'Activated and provisioned' });
+  } catch (err) {
+    res.status(401).json({ error: err.message });
+  }
+});
+
+// API to Login
+app.post('/api/login', async (req, res) => {
+  const { username, password } = req.body;
+  const savedUser = await getLocalSetting('admin_user');
+  const savedPass = await getLocalSetting('admin_pass');
+
+  if (username === savedUser && password === savedPass) {
+    res.cookie('auth', 'true', { signed: true, maxAge: 86400000 }); // 24h
+    res.json({ success: true });
+  } else {
+    res.status(401).json({ error: 'Username atau Password salah' });
+  }
+});
+
+// API to Logout
+app.post('/api/logout', (req, res) => {
+  res.clearCookie('auth');
+  res.json({ success: true });
+});
+
+// Middleware to check Authentication
+async function checkAuth(req, res, next) {
+  const depo_id = await getLocalSetting('depo_id');
+  if (!depo_id) return next(); // Not activated yet, allow activation page
+  
+  if (req.signedCookies.auth === 'true') {
+    next();
+  } else {
+    res.status(401).json({ error: 'Unauthorized' });
+  }
+}
 
 // Middleware to check DB readiness
 app.use('/api', (req, res, next) => {
@@ -130,7 +223,7 @@ app.post('/api/products', async (req, res) => {
 app.post('/api/sales', async (req, res) => {
   const { items, total_amount } = req.body;
   const saleId = crypto.randomUUID();
-  const depoId = process.env.DEPO_ID || 'UNKNOWN_DEPO';
+  const depoId = await getLocalSetting('depo_id') || 'UNKNOWN_DEPO';
 
   const connection = await pool.getConnection();
   try {
@@ -177,12 +270,13 @@ app.get('/api/sales', async (req, res) => {
 // Get Sync Status
 app.get('/api/sync-status', async (req, res) => {
   try {
+    const depo_id = await getLocalSetting('depo_id') || 'UNKNOWN_DEPO';
     const [total] = await pool.query('SELECT COUNT(*) as count FROM sales');
     const [unsynced] = await pool.query('SELECT COUNT(*) as count FROM sales WHERE synced = 0');
     res.json({
       total: total[0].count,
       unsynced: unsynced[0].count,
-      depo_id: process.env.DEPO_ID || 'UNKNOWN_DEPO'
+      depo_id: depo_id
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -192,21 +286,24 @@ app.get('/api/sync-status', async (req, res) => {
 // API Route for Syncing to Central
 app.post('/api/sync-to-central', async (req, res) => {
   try {
+    const depo_id = await getLocalSetting('depo_id') || 'UNKNOWN_DEPO';
+    const depo_token = await getLocalSetting('depo_token');
+    
     const [rows] = await pool.query('SELECT * FROM sales WHERE synced = 0');
-    if (rows.length === 0) {
-      return res.json({ message: 'No new data to sync' });
-    }
+    if (rows.length === 0) return res.json({ message: 'No new data to sync' });
 
-    const centralUrl = process.env.CENTRAL_URL || 'http://pusat:4000/api/receive-sync';
+    const centralUrl = (process.env.CENTRAL_URL || 'http://web-pusat:4000/api/receive-sync');
     
     const response = await fetch(centralUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sales: rows })
+      headers: { 
+        'Content-Type': 'application/json',
+        'X-Depo-Token': depo_token
+      },
+      body: JSON.stringify({ sales: rows.map(r => ({ ...r, depo_id })) })
     });
 
     if (response.ok) {
-      // Mark as synced
       const ids = rows.map(r => r.id);
       await pool.query('UPDATE sales SET synced = 1 WHERE id IN (?)', [ids]);
       res.json({ message: 'Sync success', count: rows.length });
@@ -215,293 +312,169 @@ app.post('/api/sync-to-central', async (req, res) => {
       throw new Error(err.error || 'Central server rejected sync');
     }
   } catch (err) {
-    console.error('Sync Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// API to Pull Master Data from Central
+app.post('/api/sync-products-from-central', async (req, res) => {
+  try {
+    const depo_token = await getLocalSetting('depo_token');
+    const centralUrl = (process.env.CENTRAL_URL || 'http://web-pusat:4000/api/receive-sync').replace('/receive-sync', '/products');
+    
+    console.log('Fetching master data from:', centralUrl);
+    const response = await fetch(centralUrl, {
+      headers: { 'X-Depo-Token': depo_token }
+    });
+    if (!response.ok) throw new Error('Failed to fetch from central');
+    
+    const products = await response.json();
+    
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      for (const p of products) {
+        await connection.query(
+          `INSERT INTO products (id, name, price) VALUES (?, ?, ?) 
+           ON DUPLICATE KEY UPDATE name = VALUES(name), price = VALUES(price)`,
+          [p.id, p.name, p.price]
+        );
+      }
+      await connection.commit();
+      res.json({ message: 'Master data synced', count: products.length });
+    } catch (err) {
+      await connection.rollback();
+      throw err;
+    } finally {
+      connection.release();
+    }
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 // Serve Frontend
-app.get('/', (req, res) => {
+app.get('/', checkAuth, (req, res) => {
   res.send(`
     <!DOCTYPE html>
     <html lang="id">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Depo Manager | High Performance Sales</title>
+        <title>Depo Manager | Secure Access</title>
         <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
         <script src="https://cdn.jsdelivr.net/npm/lucide-static@0.321.0/lib/index.min.js"></script>
         <style>
-            :root {
-                --primary: #6366f1;
-                --primary-hover: #4f46e5;
-                --bg: #0f172a;
-                --card-bg: rgba(30, 41, 59, 0.7);
-                --text: #f8fafc;
-                --text-muted: #94a3b8;
-                --success: #22c55e;
-                --warning: #f59e0b;
-                --danger: #ef4444;
-                --glass-border: rgba(255, 255, 255, 0.1);
-            }
+          /* ... root and base styles remain same ... */
+          :root { --primary: #6366f1; --bg: #0f172a; --card-bg: rgba(30, 41, 59, 0.7); --text: #f8fafc; --text-muted: #94a3b8; --success: #22c55e; --warning: #f59e0b; --danger: #ef4444; --glass-border: rgba(255, 255, 255, 0.1); }
+          * { margin: 0; padding: 0; box-sizing: border-box; }
+          body { font-family: 'Outfit', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; display: flex; }
 
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            body { 
-                font-family: 'Outfit', sans-serif; 
-                background: var(--bg); 
-                color: var(--text);
-                min-height: 100vh;
-                display: flex;
-            }
-
-            /* Sidebar */
-            .sidebar {
-                width: 260px;
-                background: rgba(15, 23, 42, 0.95);
-                border-right: 1px solid var(--glass-border);
-                display: flex;
-                flex-direction: column;
-                padding: 2rem 1.5rem;
-                position: fixed;
-                height: 100vh;
-            }
-
-            .logo {
-                font-size: 1.5rem;
-                font-weight: 700;
-                margin-bottom: 3rem;
-                display: flex;
-                align-items: center;
-                gap: 12px;
-                background: linear-gradient(to right, #818cf8, #c084fc);
-                -webkit-background-clip: text;
-                -webkit-text-fill-color: transparent;
-            }
-
-            .nav-item {
-                padding: 12px 16px;
-                border-radius: 12px;
-                color: var(--text-muted);
-                text-decoration: none;
-                margin-bottom: 8px;
-                display: flex;
-                align-items: center;
-                gap: 12px;
-                transition: all 0.3s;
-                cursor: pointer;
-            }
-
-            .nav-item:hover, .nav-item.active {
-                background: rgba(99, 102, 241, 0.1);
-                color: var(--text);
-            }
-
-            /* Main Content */
-            .main {
-                flex: 1;
-                margin-left: 260px;
-                padding: 2.5rem;
-                max-width: 1200px;
-            }
-
-            header {
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                margin-bottom: 3rem;
-            }
-
-            .stats-grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-                gap: 1.5rem;
-                margin-bottom: 3rem;
-            }
-
-            .stat-card {
-                background: var(--card-bg);
-                backdrop-filter: blur(12px);
-                border: 1px solid var(--glass-border);
-                padding: 1.5rem;
-                border-radius: 20px;
-                transition: transform 0.3s;
-            }
-
-            .stat-card:hover { transform: translateY(-5px); }
-
-            .stat-label { color: var(--text-muted); font-size: 0.875rem; margin-bottom: 0.5rem; }
-            .stat-value { font-size: 1.75rem; font-weight: 700; }
-
-            /* Forms & Tables */
-            .glass-panel {
-                background: var(--card-bg);
-                backdrop-filter: blur(12px);
-                border: 1px solid var(--glass-border);
-                border-radius: 24px;
-                padding: 2rem;
-                margin-bottom: 2rem;
-            }
-
-            h2 { margin-bottom: 1.5rem; font-size: 1.25rem; font-weight: 600; }
-
-            .btn {
-                background: var(--primary);
-                color: white;
-                border: none;
-                padding: 12px 24px;
-                border-radius: 12px;
-                font-weight: 600;
-                cursor: pointer;
-                transition: all 0.3s;
-                display: inline-flex;
-                align-items: center;
-                gap: 8px;
-            }
-
-            .btn:hover { background: var(--primary-hover); transform: translateY(-2px); }
-
-            .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
-
-            input, select {
-                background: rgba(15, 23, 42, 0.5);
-                border: 1px solid var(--glass-border);
-                padding: 12px;
-                border-radius: 10px;
-                color: white;
-                width: 100%;
-                margin-bottom: 1rem;
-            }
-
-            table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
-            th { text-align: left; padding: 12px; color: var(--text-muted); border-bottom: 1px solid var(--glass-border); }
-            td { padding: 16px 12px; border-bottom: 1px solid rgba(255,255,255,0.05); }
-
-            .badge {
-                padding: 4px 12px;
-                border-radius: 99px;
-                font-size: 0.75rem;
-                font-weight: 600;
-            }
-            .badge-sync { background: rgba(34, 197, 94, 0.1); color: var(--success); }
-            .badge-pending { background: rgba(245, 158, 11, 0.1); color: var(--warning); }
-
-            #notification {
-                position: fixed;
-                bottom: 2rem;
-                right: 2rem;
-                padding: 1rem 2rem;
-                border-radius: 12px;
-                display: none;
-                animation: slideIn 0.3s ease;
-                z-index: 1000;
-            }
-
-            @keyframes slideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
+          #activation-overlay, #login-overlay { position: fixed; inset: 0; background: var(--bg); z-index: 9999; display: flex; align-items: center; justify-content: center; padding: 20px; }
+          .auth-card { background: var(--card-bg); border: 1px solid var(--glass-border); padding: 3rem; border-radius: 24px; max-width: 400px; width: 100%; text-align: center; backdrop-filter: blur(20px); }
+          
+          /* Sidebar */
+          .sidebar { width: 260px; background: rgba(15, 23, 42, 0.95); border-right: 1px solid var(--glass-border); display: flex; flex-direction: column; padding: 2rem 1.5rem; position: fixed; height: 100vh; }
+          .logo { font-size: 1.5rem; font-weight: 700; margin-bottom: 3rem; display: flex; align-items: center; gap: 12px; background: linear-gradient(to right, #818cf8, #c084fc); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+          .nav-item { padding: 12px 16px; border-radius: 12px; color: var(--text-muted); text-decoration: none; margin-bottom: 8px; display: flex; align-items: center; gap: 12px; transition: all 0.3s; cursor: pointer; }
+          .nav-item:hover, .nav-item.active { background: rgba(99, 102, 241, 0.1); color: var(--text); }
+          
+          .main { flex: 1; margin-left: 260px; padding: 2.5rem; max-width: 1200px; }
+          header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 3rem; }
+          .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1.5rem; margin-bottom: 3rem; }
+          .stat-card { background: var(--card-bg); backdrop-filter: blur(12px); border: 1px solid var(--glass-border); padding: 1.5rem; border-radius: 20px; transition: transform 0.3s; }
+          .stat-card:hover { transform: translateY(-5px); }
+          .stat-label { color: var(--text-muted); font-size: 0.875rem; margin-bottom: 0.5rem; }
+          .stat-value { font-size: 1.75rem; font-weight: 700; }
+          .glass-panel { background: var(--card-bg); backdrop-filter: blur(12px); border: 1px solid var(--glass-border); border-radius: 24px; padding: 2rem; margin-bottom: 2rem; }
+          .btn { background: var(--primary); color: white; border: none; padding: 12px 24px; border-radius: 12px; font-weight: 600; cursor: pointer; transition: all 0.3s; display: inline-flex; align-items: center; gap: 8px; }
+          .btn:hover { background: var(--primary-hover); transform: translateY(-2px); }
+          input, select { background: rgba(15, 23, 42, 0.5); border: 1px solid var(--glass-border); padding: 12px; border-radius: 10px; color: white; width: 100%; margin-bottom: 1rem; }
+          table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+          th { text-align: left; padding: 12px; color: var(--text-muted); border-bottom: 1px solid var(--glass-border); }
+          td { padding: 16px 12px; border-bottom: 1px solid rgba(255,255,255,0.05); }
+          .badge { padding: 4px 12px; border-radius: 99px; font-size: 0.75rem; font-weight: 600; }
+          .badge-sync { background: rgba(34, 197, 94, 0.1); color: var(--success); }
+          .badge-pending { background: rgba(245, 158, 11, 0.1); color: var(--warning); }
+          #notification { position: fixed; bottom: 2rem; right: 2rem; padding: 1rem 2rem; border-radius: 12px; display: none; z-index: 10000; }
         </style>
     </head>
     <body>
-        <div class="sidebar">
-            <div class="logo">DEPO CORE</div>
-            <div class="nav-item active" onclick="showSection('dashboard')">Dashboard</div>
-            <div class="nav-item" onclick="showSection('inventory')">Inventory</div>
-            <div class="nav-item" onclick="showSection('sales')">Sales Transaksi</div>
-            <div class="nav-item" onclick="syncData()">Force Sync</div>
+        <!-- Activation Overlay -->
+        <div id="activation-overlay" style="display: none;">
+            <div class="auth-card">
+                <i data-lucide="shield-check" style="width: 50px; height: 50px; color: var(--primary); margin-bottom: 1rem;"></i>
+                <h2>Aktivasi Server</h2>
+                <p style="color: var(--text-muted); margin-bottom: 1.5rem; font-size: 0.9rem;">Server belum aktif. Masukkan Token dari Pusat.</p>
+                <input type="text" id="activation-token" placeholder="Token Access">
+                <button class="btn" onclick="activateApp()" style="width: 100%; justify-content: center;">Aktifkan</button>
+            </div>
         </div>
+
+        <!-- Login Overlay -->
+        <div id="login-overlay" style="display: none;">
+            <div class="auth-card">
+                <i data-lucide="lock" style="width: 50px; height: 50px; color: var(--warning); margin-bottom: 1rem;"></i>
+                <h2>Login Dashboard</h2>
+                <p style="color: var(--text-muted); margin-bottom: 1.5rem; font-size: 0.9rem;">Gunakan akun yang di-set dari Pusat.</p>
+                <input type="text" id="login-user" placeholder="Username">
+                <input type="password" id="login-pass" placeholder="Password">
+                <button class="btn" onclick="loginApp()" style="width: 100%; justify-content: center; background: var(--success);">Masuk</button>
+            </div>
+        </div>
+
+        <nav class="sidebar">
+            <div class="logo"><i data-lucide="layers"></i> DEPO CORE</div>
+            <div class="nav-item active" onclick="showSection('dashboard')"><i data-lucide="layout-dashboard"></i> Dashboard</div>
+            <div class="nav-item" onclick="showSection('inventory')"><i data-lucide="package"></i> Inventory</div>
+            <div class="nav-item" onclick="showSection('sales')"><i data-lucide="shopping-cart"></i> Sales</div>
+            <div class="nav-item" onclick="syncData()"><i data-lucide="refresh-cw"></i> Force Sync</div>
+            <div style="margin-top: auto;">
+              <div class="nav-item" onclick="logoutApp()" style="color: var(--danger);"><i data-lucide="log-out"></i> Logout</div>
+            </div>
+        </nav>
 
         <div class="main">
             <header>
                 <div>
                     <h1 id="page-title">Dashboard</h1>
-                    <p id="depo-name" style="color: var(--text-muted)">ID Depo: Loading...</p>
+                    <p id="depo-display-name" style="color: var(--primary); font-weight: 600;"></p>
+                    <p id="depo-id-label" style="color: var(--text-muted); font-size: 0.8rem;"></p>
                 </div>
-                <div class="btn" onclick="showSection('sales')">+ Transaksi Baru</div>
+                <div class="btn" onclick="showSection('sales')"><i data-lucide="plus"></i> Transaksi Baru</div>
             </header>
 
             <div id="section-dashboard">
                 <div class="stats-grid">
-                    <div class="stat-card">
-                        <div class="stat-label">Total Penjualan</div>
-                        <div id="stat-total-sales" class="stat-value">Rp 0</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Produk Terdaftar</div>
-                        <div id="stat-products" class="stat-value">0</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Belum Tersync</div>
-                        <div id="stat-pending-sync" class="stat-value">0</div>
-                    </div>
+                    <div class="stat-card"><div class="stat-label">Total Penjualan</div><div id="stat-total-sales" class="stat-value">Rp 0</div></div>
+                    <div class="stat-card"><div class="stat-label">Produk Terdaftar</div><div id="stat-products" class="stat-value">0</div></div>
+                    <div class="stat-card"><div class="stat-label">Belum Tersync</div><div id="stat-pending-sync" class="stat-value">0</div></div>
                 </div>
-
                 <div class="glass-panel">
                     <h2>Transaksi Terakhir</h2>
-                    <table id="sales-table">
-                        <thead>
-                            <tr>
-                                <th>ID Transaksi</th>
-                                <th>Tanggal</th>
-                                <th>Total</th>
-                                <th>Status Sync</th>
-                            </tr>
-                        </thead>
-                        <tbody></tbody>
-                    </table>
+                    <table id="sales-table"><thead><tr><th>ID</th><th>Tanggal</th><th>Total</th><th>Status</th></tr></thead><tbody></tbody></table>
                 </div>
             </div>
 
             <div id="section-inventory" style="display: none;">
-                <div class="glass-panel">
-                    <h2>Tambah Produk Baru</h2>
-                    <div class="grid-2">
-                        <input type="text" id="p-name" placeholder="Nama Produk">
-                        <input type="number" id="p-price" placeholder="Harga">
-                    </div>
-                    <input type="number" id="p-stock" placeholder="Stok Awal">
-                    <button class="btn" onclick="addProduct()">Simpan Produk</button>
+                <div class="glass-panel" style="text-align: center; padding: 3rem;">
+                    <i data-lucide="package-search" style="width: 48px; height: 48px; color: var(--primary); margin-bottom: 1rem;"></i>
+                    <h2>Master Data Produk</h2>
+                    <p style="color: var(--text-muted); margin-bottom: 2rem;">Ambil data produk terbaru dari Server Pusat.</p>
+                    <button class="btn" onclick="syncMasterData()"><i data-lucide="refresh-cw"></i> Sync dari Pusat</button>
                 </div>
-
                 <div class="glass-panel">
-                    <h2>Daftar Produk</h2>
-                    <table id="products-table">
-                        <thead>
-                            <tr>
-                                <th>ID</th>
-                                <th>Nama</th>
-                                <th>Harga</th>
-                                <th>Stok</th>
-                            </tr>
-                        </thead>
-                        <tbody></tbody>
-                    </table>
+                    <h2>Daftar Produk Lokal</h2>
+                    <table id="products-table"><thead><tr><th>ID</th><th>Nama</th><th>Harga</th><th>Stok</th></tr></thead><tbody></tbody></table>
                 </div>
             </div>
 
             <div id="section-sales" style="display: none;">
                 <div class="glass-panel">
                     <h2>Input Penjualan</h2>
-                    <div id="sale-form">
-                        <select id="sale-product-select"></select>
-                        <input type="number" id="sale-qty" placeholder="Jumlah">
-                        <button class="btn" onclick="addToCart()">Tambah ke Keranjang</button>
-                    </div>
-                    
-                    <div style="margin-top: 2rem;">
-                        <h3>Keranjang</h3>
-                        <table id="cart-table">
-                            <thead>
-                                <tr>
-                                    <th>Produk</th>
-                                    <th>Qty</th>
-                                    <th>Harga</th>
-                                    <th>Subtotal</th>
-                                </tr>
-                            </thead>
-                            <tbody></tbody>
-                        </table>
-                        <div style="margin-top: 1.5rem; text-align: right;">
-                            <h3 id="cart-total">Total: Rp 0</h3>
-                            <button class="btn" onclick="checkout()" style="margin-top: 1rem; background: var(--success);">Selesaikan Transaksi</button>
-                        </div>
+                    <div style="display: flex; gap: 10px;"><select id="sale-product-select" style="flex: 2;"></select><input type="number" id="sale-qty" placeholder="Qty" style="flex: 1;"><button class="btn" onclick="addToCart()">Add</button></div>
+                    <div style="margin-top: 2rem;"><h3>Keranjang</h3><table id="cart-table"><thead><tr><th>Produk</th><th>Qty</th><th>Harga</th><th>Subtotal</th></tr></thead><tbody></tbody></table>
+                        <div style="margin-top: 1.5rem; text-align: right;"><h3 id="cart-total">Total: Rp 0</h3><button class="btn" onclick="checkout()" style="background: var(--success); margin-top: 1rem;">Checkout</button></div>
                     </div>
                 </div>
             </div>
@@ -515,193 +488,119 @@ app.get('/', (req, res) => {
 
             async function fetchData() {
                 try {
-                    const [prodRes, salesRes, syncRes] = await Promise.all([
-                        fetch('/api/products'),
-                        fetch('/api/sales'),
-                        fetch('/api/sync-status')
-                    ]);
-
-                    if (!prodRes.ok || !salesRes.ok || !syncRes.ok) {
-                        const errData = await syncRes.json();
-                        throw new Error(errData.error || 'Server is starting up...');
+                    const configRes = await fetch('/api/config');
+                    if (configRes.status === 401) {
+                      document.getElementById('login-overlay').style.display = 'flex';
+                      return;
+                    }
+                    const config = await configRes.json();
+                    
+                    if (!config.activated) {
+                        document.getElementById('activation-overlay').style.display = 'flex';
+                        return;
                     }
 
-                    products = await prodRes.json();
-                    const sales = await salesRes.json();
-                    const syncStatus = await syncRes.json();
+                    document.getElementById('activation-overlay').style.display = 'none';
+                    document.getElementById('login-overlay').style.display = 'none';
+                    document.getElementById('depo-display-name').innerText = config.depo_name;
+                    document.getElementById('depo-id-label').innerText = 'ID: ' + config.depo_id;
 
-                    updateUI(products, sales, syncStatus);
+                    const [prodRes, salesRes, syncRes] = await Promise.all([
+                        fetch('/api/products'), fetch('/api/sales'), fetch('/api/sync-status')
+                    ]);
+
+                    products = await prodRes.json();
+                    updateUI(products, await salesRes.json(), await syncRes.json());
+                    lucide.createIcons();
                 } catch (err) {
-                    console.error(err);
-                    notify(err.message, 'warning');
-                    // Set default UI state if DB not ready
-                    document.getElementById('depo-name').innerText = 'ID Depo: Connecting...';
+                    notify('Error koneksi', 'danger');
                 }
             }
 
+            async function activateApp() {
+                const token = document.getElementById('activation-token').value;
+                const res = await fetch('/api/activate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) });
+                if (res.ok) { notify('Berhasil!', 'success'); setTimeout(() => location.reload(), 1500); }
+                else { notify('Token salah', 'danger'); }
+            }
+
+            async function loginApp() {
+                const username = document.getElementById('login-user').value;
+                const password = document.getElementById('login-pass').value;
+                const res = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }) });
+                if (res.ok) { location.reload(); }
+                else { notify('User/Pass salah', 'danger'); }
+            }
+
+            async function logoutApp() {
+                await fetch('/api/logout', { method: 'POST' });
+                location.reload();
+            }
+
             function updateUI(products, sales, syncStatus) {
-                document.getElementById('depo-name').innerText = 'ID Depo: ' + syncStatus.depo_id;
                 document.getElementById('stat-products').innerText = products.length;
                 document.getElementById('stat-pending-sync').innerText = syncStatus.unsynced;
-                
-                const totalSales = sales.reduce((acc, s) => acc + parseFloat(s.total_amount), 0);
-                document.getElementById('stat-total-sales').innerText = 'Rp ' + totalSales.toLocaleString();
+                document.getElementById('stat-total-sales').innerText = 'Rp ' + sales.reduce((acc, s) => acc + parseFloat(s.total_amount), 0).toLocaleString();
 
-                // Products Table & Select
-                const prodTable = document.querySelector('#products-table tbody');
-                const prodSelect = document.getElementById('sale-product-select');
-                prodTable.innerHTML = '';
-                prodSelect.innerHTML = '<option value="">Pilih Produk...</option>';
-                
+                const pTable = document.querySelector('#products-table tbody');
+                const pSelect = document.getElementById('sale-product-select');
+                pTable.innerHTML = ''; pSelect.innerHTML = '<option value="">Pilih...</option>';
                 products.forEach(p => {
-                    prodTable.innerHTML += '<tr>' +
-                        '<td>' + p.id + '</td>' +
-                        '<td>' + p.name + '</td>' +
-                        '<td>Rp ' + parseFloat(p.price).toLocaleString() + '</td>' +
-                        '<td>' + p.stock + '</td>' +
-                        '</tr>';
-                    prodSelect.innerHTML += '<option value="' + p.id + '">' + p.name + ' (Stok: ' + p.stock + ')</option>';
+                    pTable.innerHTML += \`<tr><td>\${p.id}</td><td>\${p.name}</td><td>Rp \${parseFloat(p.price).toLocaleString()}</td><td>\${p.stock}</td></tr>\`;
+                    pSelect.innerHTML += \`<option value="\${p.id}">\${p.name}</option>\`;
                 });
 
-                // Sales Table
-                const salesTable = document.querySelector('#sales-table tbody');
-                salesTable.innerHTML = '';
+                const sTable = document.querySelector('#sales-table tbody');
+                sTable.innerHTML = '';
                 sales.slice(0, 10).forEach(s => {
-                    const statusClass = s.synced ? 'badge-sync' : 'badge-pending';
-                    const statusText = s.synced ? 'Synced' : 'Pending Sync';
-                    salesTable.innerHTML += '<tr>' +
-                        '<td style="font-family: monospace; font-size: 0.8rem;">' + s.id + '</td>' +
-                        '<td>' + new Date(s.sale_date).toLocaleString() + '</td>' +
-                        '<td>Rp ' + parseFloat(s.total_amount).toLocaleString() + '</td>' +
-                        '<td><span class="badge ' + statusClass + '">' + statusText + '</span></td>' +
-                        '</tr>';
+                    const cls = s.synced ? 'badge-sync' : 'badge-pending';
+                    sTable.innerHTML += \`<tr><td>\${s.id.slice(0,8)}</td><td>\${new Date(s.sale_date).toLocaleDateString()}</td><td>Rp \${parseFloat(s.total_amount).toLocaleString()}</td><td><span class="badge \${cls}">\${s.synced ? 'OK' : 'Wait'}</span></td></tr>\`;
                 });
             }
 
             function showSection(name) {
-                ['dashboard', 'inventory', 'sales'].forEach(s => {
-                    document.getElementById('section-' + s).style.display = s === name ? 'block' : 'none';
-                });
-                document.getElementById('page-title').innerText = name.charAt(0).toUpperCase() + name.slice(1);
-                
-                // Update active nav
-                document.querySelectorAll('.nav-item').forEach(item => {
-                    item.classList.remove('active');
-                    if (item.innerText.toLowerCase().includes(name)) item.classList.add('active');
-                });
+                ['dashboard', 'inventory', 'sales'].forEach(s => document.getElementById('section-' + s).style.display = s === name ? 'block' : 'none');
+                document.getElementById('page-title').innerText = name.toUpperCase();
             }
 
-            async function addProduct() {
-                const name = document.getElementById('p-name').value;
-                const price = document.getElementById('p-price').value;
-                const stock = document.getElementById('p-stock').value;
-
-                if (!name || !price) return notify('Mohon lengkapi data', 'warning');
-
-                const res = await fetch('/api/products', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name, price, stock })
-                });
-
-                if (res.ok) {
-                    notify('Produk berhasil ditambahkan', 'success');
-                    fetchData();
-                    document.getElementById('p-name').value = '';
-                    document.getElementById('p-price').value = '';
-                    document.getElementById('p-stock').value = '';
-                }
+            async function syncMasterData() {
+                notify('Syncing...', 'warning');
+                const res = await fetch('/api/sync-products-from-central', { method: 'POST' });
+                if (res.ok) { notify('Success!', 'success'); fetchData(); }
             }
 
             function addToCart() {
-                const prodId = document.getElementById('sale-product-select').value;
-                const qty = parseInt(document.getElementById('sale-qty').value);
-                const product = products.find(p => p.id == prodId);
-
-                if (!product || !qty || qty <= 0) return notify('Pilih produk dan jumlah yang valid', 'warning');
-                if (qty > product.stock) return notify('Stok tidak mencukupi', 'danger');
-
-                cart.push({
-                    product_id: product.id,
-                    name: product.name,
-                    quantity: qty,
-                    price: product.price,
-                    subtotal: product.price * qty
-                });
-
-                updateCartUI();
+                const p = products.find(i => i.id == document.getElementById('sale-product-select').value);
+                const q = parseInt(document.getElementById('sale-qty').value);
+                if (p && q > 0) { cart.push({ ...p, product_id: p.id, quantity: q, subtotal: p.price * q }); updateCartUI(); }
             }
 
             function updateCartUI() {
-                const tbody = document.querySelector('#cart-table tbody');
-                tbody.innerHTML = '';
-                let total = 0;
-
-                cart.forEach((item, index) => {
-                    total += item.subtotal;
-                    tbody.innerHTML += '<tr>' +
-                        '<td>' + item.name + '</td>' +
-                        '<td>' + item.quantity + '</td>' +
-                        '<td>Rp ' + parseFloat(item.price).toLocaleString() + '</td>' +
-                        '<td>Rp ' + item.subtotal.toLocaleString() + '</td>' +
-                        '</tr>';
-                });
-
-                document.getElementById('cart-total').innerText = 'Total: Rp ' + total.toLocaleString();
+                const b = document.querySelector('#cart-table tbody'); b.innerHTML = '';
+                let t = 0; cart.forEach(i => { t += i.subtotal; b.innerHTML += \`<tr><td>\${i.name}</td><td>\${i.quantity}</td><td>\${i.price}</td><td>\${i.subtotal}</td></tr>\`; });
+                document.getElementById('cart-total').innerText = 'Total: Rp ' + t.toLocaleString();
             }
 
             async function checkout() {
-                if (cart.length === 0) return notify('Keranjang kosong', 'warning');
-
-                const total = cart.reduce((acc, item) => acc + item.subtotal, 0);
-                const res = await fetch('/api/sales', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ items: cart, total_amount: total })
-                });
-
-                if (res.ok) {
-                    notify('Transaksi Berhasil!', 'success');
-                    cart = [];
-                    updateCartUI();
-                    fetchData();
-                    showSection('dashboard');
-                } else {
-                    notify('Gagal memproses transaksi', 'danger');
-                }
+                const t = cart.reduce((a, b) => a + b.subtotal, 0);
+                const res = await fetch('/api/sales', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items: cart, total_amount: t }) });
+                if (res.ok) { cart = []; updateCartUI(); fetchData(); showSection('dashboard'); }
             }
 
             async function syncData() {
-                notify('Sinkronisasi ke pusat dimulai...', 'warning');
-                try {
-                    const res = await fetch('/api/sync-to-central', { method: 'POST' });
-                    const data = await res.json();
-                    
-                    if (res.ok) {
-                        notify('Sukses: ' + (data.count || 0) + ' data tersinkronisasi', 'success');
-                        fetchData();
-                    } else {
-                        throw new Error(data.error || 'Koneksi ke pusat gagal');
-                    }
-                } catch (err) {
-                    notify('Gagal: ' + err.message, 'danger');
-                }
+                notify('Pushing...', 'warning');
+                const res = await fetch('/api/sync-to-central', { method: 'POST' });
+                if (res.ok) { fetchData(); notify('Synced!', 'success'); }
             }
 
-            function notify(msg, type) {
-                const n = document.getElementById('notification');
-                n.innerText = msg;
-                n.style.display = 'block';
-                n.style.background = type === 'success' ? 'var(--success)' : 
-                                   type === 'danger' ? 'var(--danger)' : 
-                                   type === 'warning' ? 'var(--warning)' : 'var(--primary)';
+            function notify(m, t) {
+                const n = document.getElementById('notification'); n.innerText = m; n.style.display = 'block';
+                n.style.background = t === 'success' ? 'var(--success)' : 'var(--danger)';
                 setTimeout(() => n.style.display = 'none', 3000);
             }
 
-            // Initial fetch
+            lucide.createIcons();
             fetchData();
-            // Refresh every 30 seconds
-            setInterval(fetchData, 30000);
         </script>
     </body>
     </html>

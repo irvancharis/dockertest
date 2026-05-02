@@ -1,7 +1,7 @@
 {
-  "name": "depo-server",
+  "name": "docker-dummy-project",
   "version": "1.0.0",
-  "description": "Depo branch MDM client server",
+  "description": "A simple dummy project for Docker testing",
   "main": "app.js",
   "scripts": {
     "start": "node app.js"
@@ -10,8 +10,6 @@
     "express": "^4.18.2",
     "mysql2": "^3.6.0",
     "dotenv": "^16.3.1",
-    "cors": "^2.8.5",
-    "body-parser": "^1.20.2",
-    "cookie-parser": "^1.4.6"
+    "cors": "^2.8.5"
   }
 }
