@@ -61,12 +61,19 @@ async function initDb() {
       )
     `);
 
-    // Schema Migration: Add columns if they don't exist (for existing databases)
+    // Schema Migration: Add columns if they don't exist
     const addColumn = async (table, col, type) => {
       try {
+        console.log(`Checking/Adding column ${col} to ${table}...`);
         await pool.query(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
-        console.log(`Added column ${col} to ${table}`);
-      } catch (e) { /* Column likely exists */ }
+        console.log(`Successfully added column ${col}`);
+      } catch (e) {
+        if (e.code === 'ER_DUP_COLUMN_NAME') {
+          console.log(`Column ${col} already exists, skipping.`);
+        } else {
+          console.error(`Error adding column ${col}:`, e.message);
+        }
+      }
     };
 
     await addColumn('depos_master', 'db_user', 'VARCHAR(50)');
