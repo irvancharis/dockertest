@@ -61,6 +61,7 @@ async function initDb() {
         admin_user VARCHAR(50),
         admin_pass VARCHAR(50),
         status VARCHAR(20) DEFAULT 'Active',
+        last_ip VARCHAR(50),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -90,9 +91,15 @@ async function checkDepoToken(req, res, next) {
   const token = req.headers['x-depo-token'];
   if (!token) return res.status(401).json({ error: 'Token diperlukan (X-Depo-Token)' });
   
+  const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+
   try {
     const [rows] = await pool.query('SELECT * FROM depos_master WHERE token = ? AND status = "Active"', [token]);
     if (rows.length === 0) return res.status(403).json({ error: 'Token tidak valid atau Depo dinonaktifkan' });
+    
+    // Track last known IP
+    await pool.query('UPDATE depos_master SET last_ip = ? WHERE depo_id = ?', [clientIp, rows[0].depo_id]);
+    
     req.depo = rows[0]; // Attach depo info to request
     next();
   } catch (err) {
@@ -286,6 +293,7 @@ app.get('/', async (req, res) => {
                       <td>
                         <div style="font-size: 0.75rem; font-weight: 600;">${d.name}</div>
                         <div style="font-size: 0.65rem; color: #94a3b8;">DB: ${d.db_user} | Login: ${d.admin_user}</div>
+                        <div style="font-size: 0.65rem; color: #6366f1; font-weight: bold;">IP: ${d.last_ip || 'Never Connected'}</div>
                       </td>
                       <td><span class="token-text">${d.token}</span></td>
                     </tr>
