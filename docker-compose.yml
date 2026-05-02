@@ -6,7 +6,8 @@ services:
     restart: always
     environment:
       MYSQL_DATABASE: pusat_db
-      MYSQL_ROOT_PASSWORD: rootpassword`n      MYSQL_ROOT_HOST: "%"
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_ROOT_HOST: "%"
     ports:
       - "3307:3306"
     volumes:
