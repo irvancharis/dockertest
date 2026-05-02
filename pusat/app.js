@@ -56,6 +56,10 @@ async function initDb() {
         depo_id VARCHAR(50) PRIMARY KEY,
         name VARCHAR(100) NOT NULL,
         token VARCHAR(100) UNIQUE NOT NULL,
+        db_user VARCHAR(50),
+        db_pass VARCHAR(50),
+        admin_user VARCHAR(50),
+        admin_pass VARCHAR(50),
         status VARCHAR(20) DEFAULT 'Active',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
@@ -161,10 +165,13 @@ app.get('/api/check-token', async (req, res) => {
 
 // API to manage depos from Pusat
 app.post('/api/depos', async (req, res) => {
-  const { depo_id, name } = req.body;
+  const { depo_id, name, db_user, db_pass, admin_user, admin_pass } = req.body;
   const token = require('crypto').randomBytes(16).toString('hex'); // Generate unique token
   try {
-    await pool.query('INSERT INTO depos_master (depo_id, name, token) VALUES (?, ?, ?)', [depo_id, name, token]);
+    await pool.query(
+      'INSERT INTO depos_master (depo_id, name, token, db_user, db_pass, admin_user, admin_pass) VALUES (?, ?, ?, ?, ?, ?, ?)', 
+      [depo_id, name, token, db_user, db_pass, admin_user, admin_pass]
+    );
     res.json({ success: true, token });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -261,18 +268,25 @@ app.get('/', async (req, res) => {
             <!-- 2. Manajemen Depo & Token -->
             <div class="card">
               <h2>🔑 Manajemen Depo & Token</h2>
-              <div style="display: flex; gap: 10px;">
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px;">
                 <input type="text" id="m-depoid" placeholder="ID Depo (e.g. BALI_01)">
                 <input type="text" id="m-name" placeholder="Nama Cabang">
-                <button onclick="registerDepo()" style="width: 150px; background: #ec4899;">Register</button>
+                <input type="text" id="m-dbuser" placeholder="MySQL User">
+                <input type="text" id="m-dbpass" placeholder="MySQL Pass">
+                <input type="text" id="m-adminuser" placeholder="Admin Login">
+                <input type="text" id="m-adminpass" placeholder="Admin Pass">
+                <button onclick="registerDepo()" style="grid-column: span 2; background: #ec4899;">Register & Generate Token</button>
               </div>
               <table>
-                <thead><tr><th>ID Depo</th><th>Nama Cabang</th><th>Token Access</th></tr></thead>
+                <thead><tr><th>ID Depo</th><th>Profil & Akses</th><th>Token</th></tr></thead>
                 <tbody>
                   ${deposMaster.map(d => `
                     <tr>
                       <td><span class="badge">${d.depo_id}</span></td>
-                      <td>${d.name}</td>
+                      <td>
+                        <div style="font-size: 0.75rem; font-weight: 600;">${d.name}</div>
+                        <div style="font-size: 0.65rem; color: #94a3b8;">DB: ${d.db_user} | Login: ${d.admin_user}</div>
+                      </td>
                       <td><span class="token-text">${d.token}</span></td>
                     </tr>
                   `).join('')}
@@ -333,11 +347,17 @@ app.get('/', async (req, res) => {
           async function registerDepo() {
             const depo_id = document.getElementById('m-depoid').value;
             const name = document.getElementById('m-name').value;
-            if(!depo_id || !name) return alert('Lengkapi data Depo');
+            const db_user = document.getElementById('m-dbuser').value;
+            const db_pass = document.getElementById('m-dbpass').value;
+            const admin_user = document.getElementById('m-adminuser').value;
+            const admin_pass = document.getElementById('m-adminpass').value;
+
+            if(!depo_id || !name || !db_user || !db_pass) return alert('Lengkapi data Depo & DB');
+            
             const res = await fetch('/api/depos', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ depo_id, name })
+              body: JSON.stringify({ depo_id, name, db_user, db_pass, admin_user, admin_pass })
             });
             if(res.ok) location.reload();
           }
