@@ -220,6 +220,40 @@ app.post('/api/sync-to-central', async (req, res) => {
   }
 });
 
+// API to Pull Master Data from Central
+app.post('/api/sync-products-from-central', async (req, res) => {
+  try {
+    const centralUrl = (process.env.CENTRAL_URL || 'http://web-pusat:4000/api/receive-sync').replace('/receive-sync', '/products');
+    
+    console.log('Fetching master data from:', centralUrl);
+    const response = await fetch(centralUrl);
+    if (!response.ok) throw new Error('Failed to fetch from central');
+    
+    const products = await response.json();
+    
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      for (const p of products) {
+        await connection.query(
+          `INSERT INTO products (id, name, price) VALUES (?, ?, ?) 
+           ON DUPLICATE KEY UPDATE name = VALUES(name), price = VALUES(price)`,
+          [p.id, p.name, p.price]
+        );
+      }
+      await connection.commit();
+      res.json({ message: 'Master data synced', count: products.length });
+    } catch (err) {
+      await connection.rollback();
+      throw err;
+    } finally {
+      connection.release();
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Serve Frontend
 app.get('/', (req, res) => {
   res.send(`
@@ -450,18 +484,17 @@ app.get('/', (req, res) => {
             </div>
 
             <div id="section-inventory" style="display: none;">
-                <div class="glass-panel">
-                    <h2>Tambah Produk Baru</h2>
-                    <div class="grid-2">
-                        <input type="text" id="p-name" placeholder="Nama Produk">
-                        <input type="number" id="p-price" placeholder="Harga">
-                    </div>
-                    <input type="number" id="p-stock" placeholder="Stok Awal">
-                    <button class="btn" onclick="addProduct()">Simpan Produk</button>
+                <div class="glass-panel" style="text-align: center; padding: 3rem;">
+                    <i data-lucide="package-search" style="width: 48px; height: 48px; color: var(--primary); margin-bottom: 1rem;"></i>
+                    <h2>Master Data Produk</h2>
+                    <p style="color: var(--text-muted); margin-bottom: 2rem;">Data produk sekarang dikelola terpusat dari Server Pusat.</p>
+                    <button class="btn" onclick="syncMasterData()">
+                        <i data-lucide="refresh-cw"></i> Sync Master Data dari Pusat
+                    </button>
                 </div>
 
                 <div class="glass-panel">
-                    <h2>Daftar Produk</h2>
+                    <h2>Daftar Produk Lokal</h2>
                     <table id="products-table">
                         <thead>
                             <tr>
@@ -591,25 +624,19 @@ app.get('/', (req, res) => {
                 });
             }
 
-            async function addProduct() {
-                const name = document.getElementById('p-name').value;
-                const price = document.getElementById('p-price').value;
-                const stock = document.getElementById('p-stock').value;
-
-                if (!name || !price) return notify('Mohon lengkapi data', 'warning');
-
-                const res = await fetch('/api/products', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name, price, stock })
-                });
-
-                if (res.ok) {
-                    notify('Produk berhasil ditambahkan', 'success');
-                    fetchData();
-                    document.getElementById('p-name').value = '';
-                    document.getElementById('p-price').value = '';
-                    document.getElementById('p-stock').value = '';
+            async function syncMasterData() {
+                notify('Menarik data produk dari pusat...', 'warning');
+                try {
+                    const res = await fetch('/api/sync-products-from-central', { method: 'POST' });
+                    const data = await res.json();
+                    if (res.ok) {
+                        notify('Master data berhasil diupdate: ' + data.count + ' produk', 'success');
+                        fetchData();
+                    } else {
+                        throw new Error(data.error);
+                    }
+                } catch (err) {
+                    notify('Gagal sync: ' + err.message, 'danger');
                 }
             }
 
