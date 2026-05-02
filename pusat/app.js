@@ -199,11 +199,42 @@ app.post('/api/depo-prices', async (req, res) => {
   }
 });
 
+// Delete Depo
+app.delete('/api/depos/:depo_id', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM depos_master WHERE depo_id = ?', [req.params.depo_id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Toggle Depo Status
+app.patch('/api/depos/:depo_id/status', async (req, res) => {
+  const { status } = req.body;
+  try {
+    await pool.query('UPDATE depos_master SET status = ? WHERE depo_id = ?', [status, req.params.depo_id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // API to add product in Pusat
 app.post('/api/products', async (req, res) => {
   const { name, price } = req.body;
   try {
     await pool.query('INSERT INTO products (name, price) VALUES (?, ?)', [name, price]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete Product
+app.delete('/api/products/:id', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM products WHERE id = ?', [req.params.id]);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -265,9 +296,15 @@ app.get('/', async (req, res) => {
                 <button onclick="addProduct()" style="width: 150px;">Simpan</button>
               </div>
               <table>
-                <thead><tr><th>Nama</th><th>Base Price</th></tr></thead>
+                <thead><tr><th>Nama</th><th>Base Price</th><th>Aksi</th></tr></thead>
                 <tbody>
-                  ${products.map(p => `<tr><td>${p.name}</td><td>Rp ${parseFloat(p.price).toLocaleString()}</td></tr>`).join('')}
+                  ${products.map(p => `
+                    <tr>
+                      <td>${p.name}</td>
+                      <td>Rp ${parseFloat(p.price).toLocaleString()}</td>
+                      <td><button onclick="deleteProduct(${p.id})" style="padding: 4px; background: #ef4444; width: auto; font-size: 0.6rem;">Hapus</button></td>
+                    </tr>
+                  `).join('')}
                 </tbody>
               </table>
             </div>
@@ -286,7 +323,7 @@ app.get('/', async (req, res) => {
                 <button onclick="registerDepo()" style="grid-column: span 2; background: #ec4899;">Register & Generate Token</button>
               </div>
               <table>
-                <thead><tr><th>ID Depo</th><th>Profil & Akses</th><th>Token</th></tr></thead>
+                <thead><tr><th>ID Depo</th><th>Profil & Akses</th><th>Token</th><th>Status</th><th>Aksi</th></tr></thead>
                 <tbody>
                   ${deposMaster.map(d => `
                     <tr>
@@ -297,6 +334,17 @@ app.get('/', async (req, res) => {
                         <div style="font-size: 0.65rem; color: #6366f1; font-weight: bold;">IP: ${d.last_ip || 'Never Connected'}</div>
                       </td>
                       <td><span class="token-text">${d.token}</span></td>
+                      <td>
+                        <span class="badge" style="background: ${d.status === 'Active' ? 'rgba(34,197,94,0.2)' : 'rgba(239,68,68,0.2)'}; color: ${d.status === 'Active' ? '#4ade80' : '#f87171'};">
+                          ${d.status}
+                        </span>
+                      </td>
+                      <td>
+                        <div style="display: flex; gap: 5px;">
+                          <button onclick="toggleDepo('${d.depo_id}', '${d.status === 'Active' ? 'Inactive' : 'Active'}')" style="padding: 4px; background: #64748b; font-size: 0.6rem;">Toggle</button>
+                          <button onclick="deleteDepo('${d.depo_id}')" style="padding: 4px; background: #ef4444; font-size: 0.6rem;">Hapus</button>
+                        </div>
+                      </td>
                     </tr>
                   `).join('')}
                 </tbody>
@@ -381,6 +429,27 @@ app.get('/', async (req, res) => {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ depo_id, product_id, price })
             });
+            if(res.ok) location.reload();
+          }
+
+          async function deleteDepo(id) {
+            if(!confirm('Hapus Depo ini?')) return;
+            const res = await fetch('/api/depos/' + id, { method: 'DELETE' });
+            if(res.ok) location.reload();
+          }
+
+          async function toggleDepo(id, status) {
+            const res = await fetch('/api/depos/' + id + '/status', { 
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ status })
+            });
+            if(res.ok) location.reload();
+          }
+
+          async function deleteProduct(id) {
+            if(!confirm('Hapus Produk ini?')) return;
+            const res = await fetch('/api/products/' + id, { method: 'DELETE' });
             if(res.ok) location.reload();
           }
         </script>
