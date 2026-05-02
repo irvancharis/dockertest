@@ -13,7 +13,7 @@ services:
       - db_data:/var/lib/mysql
 
   web:
-    build: ./pusat
+    build: .
     ports:
       - "4000:4000"
     container_name: pusat-app
