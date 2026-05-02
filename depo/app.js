@@ -223,7 +223,10 @@ app.post('/api/sync-to-central', async (req, res) => {
 // API to Pull Master Data from Central
 app.post('/api/sync-products-from-central', async (req, res) => {
   try {
-    const centralUrl = (process.env.CENTRAL_URL || 'http://web-pusat:4000/api/receive-sync').replace('/receive-sync', '/products');
+    const depoId = process.env.DEPO_ID || 'UNKNOWN_DEPO';
+    // Append depo_id to query string
+    const baseUrl = (process.env.CENTRAL_URL || 'http://web-pusat:4000/api/receive-sync').replace('/receive-sync', '/products');
+    const centralUrl = `${baseUrl}?depo_id=${depoId}`;
     
     console.log('Fetching master data from:', centralUrl);
     const response = await fetch(centralUrl);
