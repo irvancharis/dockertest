@@ -1,11 +1,10 @@
 services:
   db:
-    image: mysql:8.0
+    image: mariadb:latest
     restart: always
     environment:
-      MYSQL_DATABASE: depo_db
-      MYSQL_ROOT_PASSWORD: rootpassword
-      MYSQL_ROOT_HOST: "%"
+      MARIADB_DATABASE: depo_db
+      MARIADB_ROOT_PASSWORD: rootpassword
     ports:
       - "3306:3306"
     volumes:
