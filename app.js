@@ -33,29 +33,15 @@ async function initDb() {
     });
     await tempConn.query(`CREATE DATABASE IF NOT EXISTS ${dbConfig.database}`);
     await tempConn.query(`USE ${dbConfig.database}`);
-    await tempConn.query(`
-      CREATE TABLE IF NOT EXISTS settings (
-        setting_key VARCHAR(50) PRIMARY KEY,
-        setting_value TEXT
-      )
-    `);
+    await tempConn.query(`CREATE TABLE IF NOT EXISTS settings (setting_key VARCHAR(50) PRIMARY KEY, setting_value TEXT)`);
 
     const [rows] = await tempConn.query('SELECT setting_key, setting_value FROM settings WHERE setting_key IN ("db_user", "db_pass")');
     const settings = {};
     rows.forEach(r => settings[r.setting_key] = r.setting_value);
     await tempConn.end();
 
-    const finalUser = settings.db_user || dbConfig.user;
-    const finalPass = settings.db_pass || dbConfig.password;
-
-    pool = mysql.createPool({
-      ...dbConfig,
-      user: finalUser,
-      password: finalPass,
-      waitForConnections: true,
-      connectionLimit: 10
-    });
-
+    pool = mysql.createPool({ ...dbConfig, user: settings.db_user || dbConfig.user, password: settings.db_pass || dbConfig.password, waitForConnections: true, connectionLimit: 10 });
+    
     await pool.query(`CREATE TABLE IF NOT EXISTS products (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255) NOT NULL, price DECIMAL(10, 2) NOT NULL, stock INT DEFAULT 0)`);
     await pool.query(`CREATE TABLE IF NOT EXISTS sales (id VARCHAR(36) PRIMARY KEY, total_amount DECIMAL(10, 2) NOT NULL, sale_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP, depo_id VARCHAR(50) NOT NULL, synced BOOLEAN DEFAULT FALSE)`);
     await pool.query(`CREATE TABLE IF NOT EXISTS employees (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100) NOT NULL, position VARCHAR(50), phone VARCHAR(20), synced BOOLEAN DEFAULT FALSE)`);
@@ -70,16 +56,15 @@ async function initDb() {
 
 initDb();
 
-// IMPORTANT: Middleware to wait for DB
 app.use('/api', (req, res, next) => {
-  if (!isDbReady) return res.status(503).json({ error: 'Database sedang inisialisasi, tunggu sebentar...' });
+  if (!isDbReady) return res.status(503).json({ error: 'DB Loading' });
   next();
 });
 
 async function getLocalSetting(key) {
   try {
     const [rows] = await pool.query('SELECT setting_value FROM settings WHERE setting_key = ?', [key]);
-    return rows.length > 0 ? rows[0].setting_value : process.env[key.toUpperCase()];
+    return rows.length > 0 ? rows[0].setting_value : null;
   } catch (e) { return null; }
 }
 
@@ -121,7 +106,7 @@ app.post('/api/activate', async (req, res) => {
     await conn.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['admin_pass', data.admin_pass]);
     await conn.end();
 
-    res.json({ success: true, message: 'Activated. Rebooting...' });
+    res.json({ success: true, message: 'Activated' });
     setTimeout(() => process.exit(0), 1000);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -133,11 +118,10 @@ app.post('/api/login', async (req, res) => {
   if (username === u && password === p) {
     res.cookie('auth', 'true', { signed: true, maxAge: 86400000 });
     res.json({ success: true });
-  } else res.status(401).json({ error: 'Wrong credentials' });
+  } else res.status(401).json({ error: 'Unauthorized' });
 });
 
 app.post('/api/logout', (req, res) => { res.clearCookie('auth'); res.json({ success: true }); });
-
 app.get('/api/products', checkAuth, async (req, res) => { const [rows] = await pool.query('SELECT * FROM products'); res.json(rows); });
 app.get('/api/sales', checkAuth, async (req, res) => { const [rows] = await pool.query('SELECT * FROM sales ORDER BY sale_date DESC'); res.json(rows); });
 app.get('/api/employees', checkAuth, async (req, res) => { const [rows] = await pool.query('SELECT * FROM employees'); res.json(rows); });
@@ -175,20 +159,21 @@ app.get('/', (req, res) => {
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Depo Manager | Secure</title>
+        <title>Depo Manager</title>
         <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
         <script src="https://cdn.jsdelivr.net/npm/lucide-static@0.321.0/lib/index.min.js"></script>
         <style>
           :root { --primary: #6366f1; --bg: #0f172a; --card-bg: rgba(30, 41, 59, 0.7); --text: #f8fafc; --text-muted: #94a3b8; --success: #22c55e; --warning: #f59e0b; --danger: #ef4444; --glass-border: rgba(255, 255, 255, 0.1); }
           * { margin: 0; padding: 0; box-sizing: border-box; }
           body { font-family: 'Outfit', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; display: flex; }
-          #activation-overlay, #login-overlay { position: fixed; inset: 0; background: var(--bg); z-index: 9999; display: flex; align-items: center; justify-content: center; }
+          #loading-overlay { position: fixed; inset: 0; background: var(--bg); z-index: 10001; display: flex; align-items: center; justify-content: center; flex-direction: column; }
+          #activation-overlay, #login-overlay { position: fixed; inset: 0; background: var(--bg); z-index: 10000; display: none; align-items: center; justify-content: center; }
           .auth-card { background: var(--card-bg); border: 1px solid var(--glass-border); padding: 3rem; border-radius: 24px; text-align: center; width: 400px; backdrop-filter: blur(20px); }
           .sidebar { width: 260px; background: rgba(15, 23, 42, 0.95); border-right: 1px solid var(--glass-border); display: flex; flex-direction: column; padding: 2rem 1.5rem; position: fixed; height: 100vh; }
           .logo { font-size: 1.5rem; font-weight: 700; margin-bottom: 3rem; background: linear-gradient(to right, #818cf8, #c084fc); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
           .nav-item { padding: 12px 16px; border-radius: 12px; color: var(--text-muted); margin-bottom: 8px; display: flex; align-items: center; gap: 12px; cursor: pointer; transition: 0.3s; }
           .nav-item:hover, .nav-item.active { background: rgba(99, 102, 241, 0.1); color: var(--text); }
-          .main { flex: 1; margin-left: 260px; padding: 2.5rem; }
+          .main { flex: 1; margin-left: 260px; padding: 2.5rem; display: none; }
           header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 3rem; }
           .glass-panel { background: var(--card-bg); backdrop-filter: blur(12px); border: 1px solid var(--glass-border); border-radius: 24px; padding: 2rem; margin-bottom: 2rem; }
           .btn { background: var(--primary); color: white; border: none; padding: 12px 24px; border-radius: 12px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; }
@@ -196,20 +181,25 @@ app.get('/', (req, res) => {
           table { width: 100%; border-collapse: collapse; }
           th { text-align: left; padding: 12px; color: var(--text-muted); border-bottom: 1px solid var(--glass-border); }
           td { padding: 16px 12px; border-bottom: 1px solid rgba(255,255,255,0.05); }
-          #notification { position: fixed; bottom: 2rem; right: 2rem; padding: 1rem 2rem; border-radius: 12px; display: none; z-index: 10000; }
+          #notification { position: fixed; bottom: 2rem; right: 2rem; padding: 1rem 2rem; border-radius: 12px; display: none; z-index: 10002; }
+          .spinner { width: 40px; height: 40px; border: 4px solid rgba(255,255,255,0.1); border-top-color: var(--primary); border-radius: 50%; animation: spin 1s linear infinite; margin-bottom: 1rem; }
+          @keyframes spin { to { transform: rotate(360deg); } }
         </style>
     </head>
     <body>
-        <div id="activation-overlay" style="display: none;"><div class="auth-card"><h2>Aktivasi</h2><input id="activation-token" placeholder="Token Access"><button class="btn" onclick="activateApp()">Aktifkan</button></div></div>
-        <div id="login-overlay" style="display: none;"><div class="auth-card"><h2>Login</h2><input id="login-user" placeholder="Username"><input type="password" id="login-pass" placeholder="Password"><button class="btn" onclick="loginApp()">Masuk</button></div></div>
-        <nav class="sidebar">
+        <div id="loading-overlay"><div class="spinner"></div><p id="loading-msg">Inisialisasi Sistem...</p></div>
+        <div id="activation-overlay"><div class="auth-card"><h2>Aktivasi</h2><input id="activation-token" placeholder="Token Access"><button class="btn" onclick="activateApp()">Aktifkan</button></div></div>
+        <div id="login-overlay"><div class="auth-card"><h2>Login</h2><input id="login-user" placeholder="Username"><input type="password" id="login-pass" placeholder="Password"><button class="btn" onclick="loginApp()">Masuk</button></div></div>
+        <nav id="sidebar" class="sidebar" style="display:none">
             <div class="logo">DEPO CORE</div>
             <div class="nav-item active" onclick="showSection('dashboard')"><i data-lucide="layout-dashboard"></i> Dashboard</div>
             <div class="nav-item" onclick="showSection('inventory')"><i data-lucide="package"></i> Inventory</div>
             <div class="nav-item" onclick="showSection('employees')"><i data-lucide="users"></i> Karyawan</div>
+            <div class="nav-item" onclick="syncData()"><i data-lucide="refresh-cw"></i> Force Sync</div>
             <div style="margin-top:auto"><div class="nav-item" onclick="logoutApp()" style="color:var(--danger)"><i data-lucide="log-out"></i> Logout</div></div>
         </nav>
-        <div class="main"><header><h1 id="page-title">Dashboard</h1><p id="depo-info" style="color:var(--primary)"></p></header>
+        <div id="main-content" class="main">
+            <header><h1 id="page-title">Dashboard</h1><p id="depo-info" style="color:var(--primary); font-weight: 600;"></p></header>
             <div id="section-dashboard"><div class="glass-panel"><h2>Transaksi Terakhir</h2><table id="sales-table"><thead><tr><th>ID</th><th>Total</th><th>Status</th></tr></thead><tbody></tbody></table></div></div>
             <div id="section-inventory" style="display:none"><div class="glass-panel" style="text-align:center"><button class="btn" onclick="syncMasterData()">Sync Produk dari Pusat</button></div><div class="glass-panel"><table id="products-table"><thead><tr><th>Nama</th><th>Harga</th></tr></thead><tbody></tbody></table></div></div>
             <div id="section-employees" style="display:none"><div class="glass-panel"><h2>Input Karyawan</h2><input id="e-name" placeholder="Nama"><input id="e-pos" placeholder="Posisi"><input id="e-phone" placeholder="HP"><button class="btn" onclick="addEmployee()">Tambah</button></div><div class="glass-panel"><table id="emp-table"><thead><tr><th>Nama</th><th>Posisi</th><th>HP</th></tr></thead><tbody></tbody></table></div></div>
@@ -218,10 +208,16 @@ app.get('/', (req, res) => {
         <script>
             async function initApp() {
                 const r = await fetch('/api/config'); 
-                if (r.status === 503) { notify('DB Loading...', 'warning'); setTimeout(initApp, 2000); return; }
+                if (r.status === 503) { 
+                    document.getElementById('loading-msg').innerText = 'Menunggu Database...';
+                    setTimeout(initApp, 2000); return; 
+                }
                 const c = await r.json();
+                document.getElementById('loading-overlay').style.display = 'none';
                 if(!c.activated) { document.getElementById('activation-overlay').style.display='flex'; return; }
                 if(!c.authenticated) { document.getElementById('login-overlay').style.display='flex'; return; }
+                document.getElementById('sidebar').style.display = 'flex';
+                document.getElementById('main-content').style.display = 'block';
                 document.getElementById('depo-info').innerText = c.depo_name; fetchData();
             }
             async function fetchData() {
@@ -241,9 +237,10 @@ app.get('/', (req, res) => {
                 await fetch('/api/employees', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name, position, phone}) });
                 fetchData(); notify('Berhasil', 'success');
             }
+            async function syncData() { notify('Syncing...', 'warning'); await fetch('/api/sync-to-central', {method:'POST'}); fetchData(); notify('Success!', 'success'); }
             async function syncMasterData() { notify('Syncing...', 'warning'); await fetch('/api/sync-products-from-central', {method:'POST'}); fetchData(); notify('Update!', 'success'); }
             function showSection(n) { ['dashboard','inventory','employees'].forEach(s => document.getElementById('section-'+s).style.display = s===n?'block':'none'); }
-            function notify(m,t) { const n=document.getElementById('notification'); n.innerText=m; n.style.display='block'; n.style.background=t==='success'?'var(--success)':'var(--warning)'; setTimeout(()=>n.style.display='none',3000); }
+            function notify(m,t) { const n=document.getElementById('notification'); n.innerText=m; n.style.display='block'; n.style.background=t==='success'?'var(--success)':'var(--danger)'; setTimeout(()=>n.style.display='none',3000); }
             async function activateApp() { const token=document.getElementById('activation-token').value; const r=await fetch('/api/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})}); if(r.ok) { notify('Sukses!', 'success'); setTimeout(()=>location.reload(), 2000); } else { const err = await r.json(); notify(err.error, 'danger'); } }
             async function loginApp() { const username=document.getElementById('login-user').value; const password=document.getElementById('login-pass').value; const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,password})}); if(r.ok) location.reload(); else notify('Gagal', 'danger'); }
             function logoutApp() { fetch('/api/logout',{method:'POST'}).then(()=>location.reload()); }
