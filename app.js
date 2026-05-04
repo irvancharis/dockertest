@@ -111,9 +111,20 @@ async function getLocalSetting(key) {
 
 // API to check activation status
 app.get('/api/config', async (req, res) => {
-  const depo_id = await getLocalSetting('depo_id');
-  const depo_name = await getLocalSetting('depo_name');
-  res.json({ activated: !!depo_id, depo_id, depo_name });
+  try {
+    const depo_id = await getLocalSetting('depo_id');
+    const depo_name = await getLocalSetting('depo_name');
+    const authenticated = req.signedCookies.auth === 'true';
+    
+    res.json({
+      activated: !!depo_id,
+      depo_id,
+      depo_name,
+      authenticated
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // API to Activate Depo with Token
@@ -196,7 +207,7 @@ app.use('/api', (req, res, next) => {
 // API Routes
 
 // Get all products
-app.get('/api/products', async (req, res) => {
+app.get('/api/products', checkAuth, async (req, res) => {
   try {
     const [rows] = await pool.query('SELECT * FROM products');
     res.json(rows);
@@ -206,7 +217,7 @@ app.get('/api/products', async (req, res) => {
 });
 
 // Add a product
-app.post('/api/products', async (req, res) => {
+app.post('/api/products', checkAuth, async (req, res) => {
   const { name, price, stock } = req.body;
   try {
     const [result] = await pool.query(
@@ -220,7 +231,7 @@ app.post('/api/products', async (req, res) => {
 });
 
 // Create a sale
-app.post('/api/sales', async (req, res) => {
+app.post('/api/sales', checkAuth, async (req, res) => {
   const { items, total_amount } = req.body;
   const saleId = crypto.randomUUID();
   const depoId = await getLocalSetting('depo_id') || 'UNKNOWN_DEPO';
@@ -258,7 +269,7 @@ app.post('/api/sales', async (req, res) => {
 });
 
 // Get sales history
-app.get('/api/sales', async (req, res) => {
+app.get('/api/sales', checkAuth, async (req, res) => {
   try {
     const [rows] = await pool.query('SELECT * FROM sales ORDER BY sale_date DESC');
     res.json(rows);
@@ -268,7 +279,7 @@ app.get('/api/sales', async (req, res) => {
 });
 
 // Get Sync Status
-app.get('/api/sync-status', async (req, res) => {
+app.get('/api/sync-status', checkAuth, async (req, res) => {
   try {
     const depo_id = await getLocalSetting('depo_id') || 'UNKNOWN_DEPO';
     const [total] = await pool.query('SELECT COUNT(*) as count FROM sales');
@@ -284,7 +295,7 @@ app.get('/api/sync-status', async (req, res) => {
 });
 
 // API Route for Syncing to Central
-app.post('/api/sync-to-central', async (req, res) => {
+app.post('/api/sync-to-central', checkAuth, async (req, res) => {
   try {
     const depo_id = await getLocalSetting('depo_id') || 'UNKNOWN_DEPO';
     const depo_token = await getLocalSetting('depo_token');
@@ -317,7 +328,7 @@ app.post('/api/sync-to-central', async (req, res) => {
 });
 
 // API to Pull Master Data from Central
-app.post('/api/sync-products-from-central', async (req, res) => {
+app.post('/api/sync-products-from-central', checkAuth, async (req, res) => {
   try {
     const depo_token = await getLocalSetting('depo_token');
     const centralUrl = (process.env.CENTRAL_URL || 'http://web-pusat:4000/api/receive-sync').replace('/receive-sync', '/products');
@@ -365,7 +376,6 @@ app.get('/', (req, res) => {
         <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
         <script src="https://cdn.jsdelivr.net/npm/lucide-static@0.321.0/lib/index.min.js"></script>
         <style>
-          /* ... root and base styles remain same ... */
           :root { --primary: #6366f1; --bg: #0f172a; --card-bg: rgba(30, 41, 59, 0.7); --text: #f8fafc; --text-muted: #94a3b8; --success: #22c55e; --warning: #f59e0b; --danger: #ef4444; --glass-border: rgba(255, 255, 255, 0.1); }
           * { margin: 0; padding: 0; box-sizing: border-box; }
           body { font-family: 'Outfit', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; display: flex; }
@@ -373,7 +383,6 @@ app.get('/', (req, res) => {
           #activation-overlay, #login-overlay { position: fixed; inset: 0; background: var(--bg); z-index: 9999; display: flex; align-items: center; justify-content: center; padding: 20px; }
           .auth-card { background: var(--card-bg); border: 1px solid var(--glass-border); padding: 3rem; border-radius: 24px; max-width: 400px; width: 100%; text-align: center; backdrop-filter: blur(20px); }
           
-          /* Sidebar */
           .sidebar { width: 260px; background: rgba(15, 23, 42, 0.95); border-right: 1px solid var(--glass-border); display: flex; flex-direction: column; padding: 2rem 1.5rem; position: fixed; height: 100vh; }
           .logo { font-size: 1.5rem; font-weight: 700; margin-bottom: 3rem; display: flex; align-items: center; gap: 12px; background: linear-gradient(to right, #818cf8, #c084fc); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
           .nav-item { padding: 12px 16px; border-radius: 12px; color: var(--text-muted); text-decoration: none; margin-bottom: 8px; display: flex; align-items: center; gap: 12px; transition: all 0.3s; cursor: pointer; }
@@ -388,7 +397,7 @@ app.get('/', (req, res) => {
           .stat-value { font-size: 1.75rem; font-weight: 700; }
           .glass-panel { background: var(--card-bg); backdrop-filter: blur(12px); border: 1px solid var(--glass-border); border-radius: 24px; padding: 2rem; margin-bottom: 2rem; }
           .btn { background: var(--primary); color: white; border: none; padding: 12px 24px; border-radius: 12px; font-weight: 600; cursor: pointer; transition: all 0.3s; display: inline-flex; align-items: center; gap: 8px; }
-          .btn:hover { background: var(--primary-hover); transform: translateY(-2px); }
+          .btn:hover { background: #4f46e5; transform: translateY(-2px); }
           input, select { background: rgba(15, 23, 42, 0.5); border: 1px solid var(--glass-border); padding: 12px; border-radius: 10px; color: white; width: 100%; margin-bottom: 1rem; }
           table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
           th { text-align: left; padding: 12px; color: var(--text-muted); border-bottom: 1px solid var(--glass-border); }
@@ -400,23 +409,19 @@ app.get('/', (req, res) => {
         </style>
     </head>
     <body>
-        <!-- Activation Overlay -->
         <div id="activation-overlay" style="display: none;">
             <div class="auth-card">
                 <i data-lucide="shield-check" style="width: 50px; height: 50px; color: var(--primary); margin-bottom: 1rem;"></i>
                 <h2>Aktivasi Server</h2>
-                <p style="color: var(--text-muted); margin-bottom: 1.5rem; font-size: 0.9rem;">Server belum aktif. Masukkan Token dari Pusat.</p>
                 <input type="text" id="activation-token" placeholder="Token Access">
                 <button class="btn" onclick="activateApp()" style="width: 100%; justify-content: center;">Aktifkan</button>
             </div>
         </div>
 
-        <!-- Login Overlay -->
         <div id="login-overlay" style="display: none;">
             <div class="auth-card">
                 <i data-lucide="lock" style="width: 50px; height: 50px; color: var(--warning); margin-bottom: 1rem;"></i>
                 <h2>Login Dashboard</h2>
-                <p style="color: var(--text-muted); margin-bottom: 1.5rem; font-size: 0.9rem;">Gunakan akun yang di-set dari Pusat.</p>
                 <input type="text" id="login-user" placeholder="Username">
                 <input type="password" id="login-pass" placeholder="Password">
                 <button class="btn" onclick="loginApp()" style="width: 100%; justify-content: center; background: var(--success);">Masuk</button>
@@ -438,8 +443,7 @@ app.get('/', (req, res) => {
             <header>
                 <div>
                     <h1 id="page-title">Dashboard</h1>
-                    <p id="depo-display-name" style="color: var(--primary); font-weight: 600;"></p>
-                    <p id="depo-id-label" style="color: var(--text-muted); font-size: 0.8rem;"></p>
+                    <p id="depo-info" style="color: var(--primary); font-weight: 600;"></p>
                 </div>
                 <div class="btn" onclick="showSection('sales')"><i data-lucide="plus"></i> Transaksi Baru</div>
             </header>
@@ -458,9 +462,7 @@ app.get('/', (req, res) => {
 
             <div id="section-inventory" style="display: none;">
                 <div class="glass-panel" style="text-align: center; padding: 3rem;">
-                    <i data-lucide="package-search" style="width: 48px; height: 48px; color: var(--primary); margin-bottom: 1rem;"></i>
                     <h2>Master Data Produk</h2>
-                    <p style="color: var(--text-muted); margin-bottom: 2rem;">Ambil data produk terbaru dari Server Pusat.</p>
                     <button class="btn" onclick="syncMasterData()"><i data-lucide="refresh-cw"></i> Sync dari Pusat</button>
                 </div>
                 <div class="glass-panel">
@@ -486,32 +488,40 @@ app.get('/', (req, res) => {
             let cart = [];
             let products = [];
 
+            async function initApp() {
+                const configRes = await fetch('/api/config');
+                const config = await configRes.json();
+                
+                if (!config.activated) {
+                    document.getElementById('activation-overlay').style.display = 'flex';
+                    return;
+                }
+                
+                if (!config.authenticated) {
+                    document.getElementById('login-overlay').style.display = 'flex';
+                    return;
+                }
+
+                document.getElementById('depo-info').innerText = \`\${config.depo_name} | ID: \${config.depo_id}\`;
+                fetchData();
+            }
+
             async function fetchData() {
                 try {
-                    const configRes = await fetch('/api/config');
-                    if (configRes.status === 401) {
-                      document.getElementById('login-overlay').style.display = 'flex';
-                      return;
-                    }
-                    const config = await configRes.json();
-                    
-                    if (!config.activated) {
-                        document.getElementById('activation-overlay').style.display = 'flex';
+                    const [prodRes, salesRes, syncRes] = await Promise.all([
+                        fetch('/api/products'), 
+                        fetch('/api/sales'), 
+                        fetch('/api/sync-status')
+                    ]);
+
+                    if (prodRes.status === 401 || salesRes.status === 401) {
+                        document.getElementById('login-overlay').style.display = 'flex';
                         return;
                     }
 
-                    document.getElementById('activation-overlay').style.display = 'none';
-                    document.getElementById('login-overlay').style.display = 'none';
-                    document.getElementById('depo-display-name').innerText = config.depo_name;
-                    document.getElementById('depo-id-label').innerText = 'ID: ' + config.depo_id;
-
-                    const [prodRes, salesRes, syncRes] = await Promise.all([
-                        fetch('/api/products'), fetch('/api/sales'), fetch('/api/sync-status')
-                    ]);
-
                     products = await prodRes.json();
                     updateUI(products, await salesRes.json(), await syncRes.json());
-                    lucide.createIcons();
+                    if (typeof lucide !== 'undefined') lucide.createIcons();
                 } catch (err) {
                     notify('Error koneksi', 'danger');
                 }
@@ -533,7 +543,9 @@ app.get('/', (req, res) => {
             }
 
             async function logoutApp() {
-                await fetch('/api/logout', { method: 'POST' });
+                try {
+                    await fetch('/api/logout', { method: 'POST' });
+                } catch(e) {}
                 location.reload();
             }
 
@@ -599,8 +611,7 @@ app.get('/', (req, res) => {
                 setTimeout(() => n.style.display = 'none', 3000);
             }
 
-            if (typeof lucide !== 'undefined') lucide.createIcons();
-            fetchData();
+            initApp();
         </script>
     </body>
     </html>
