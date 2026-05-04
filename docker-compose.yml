@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   db:
     image: mysql:8.0
@@ -7,6 +5,7 @@ services:
     environment:
       MYSQL_DATABASE: depo_db
       MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_ROOT_HOST: "%"
     ports:
       - "3306:3306"
     volumes:
@@ -24,7 +23,7 @@ services:
       DB_USER: root
       DB_PASS: rootpassword
       DB_NAME: depo_db
-      CENTRAL_URL: "http://192.168.3.190:4000/api/receive-sync" # Sesuaikan IP Pusat Anda
+      CENTRAL_URL: "http://192.168.3.190:4000/api/receive-sync"
     restart: always
 
 volumes:
