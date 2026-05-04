@@ -599,7 +599,7 @@ app.get('/', (req, res) => {
                 setTimeout(() => n.style.display = 'none', 3000);
             }
 
-            lucide.createIcons();
+            if (typeof lucide !== 'undefined') lucide.createIcons();
             fetchData();
         </script>
     </body>
