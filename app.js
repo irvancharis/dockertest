@@ -11,10 +11,9 @@ const port = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(bodyParser.json());
-app.use(cookieParser('secret-key')); // Simple secret for cookies
+app.use(cookieParser('secret-key'));
 app.use(express.static('public'));
 
-// Database configuration
 const dbConfig = {
   host: process.env.DB_HOST || 'localhost',
   user: process.env.DB_USER || 'root',
@@ -22,41 +21,27 @@ const dbConfig = {
   database: process.env.DB_NAME || 'depo_db',
 };
 
-// Global pool variable
 let pool;
 let isDbReady = false;
 
 async function initDb() {
   try {
-    console.log('Connecting to MySQL host...');
-    // Create connection without database first to ensure DB exists
     const connection = await mysql.createConnection({
       host: dbConfig.host,
       user: dbConfig.user,
       password: dbConfig.password,
     });
-    
-    console.log('Creating database if not exists...');
     await connection.query(`CREATE DATABASE IF NOT EXISTS ${dbConfig.database}`);
     await connection.end();
 
-    // Now create the pool with the database specified
-    pool = mysql.createPool({
-      ...dbConfig,
-      waitForConnections: true,
-      connectionLimit: 10,
-      queueLimit: 0
-    });
+    pool = mysql.createPool({ ...dbConfig, waitForConnections: true, connectionLimit: 10 });
 
-    // Initialize tables
-    console.log('Initializing tables...');
     await pool.query(`
       CREATE TABLE IF NOT EXISTS products (
         id INT AUTO_INCREMENT PRIMARY KEY,
         name VARCHAR(255) NOT NULL,
         price DECIMAL(10, 2) NOT NULL,
-        stock INT DEFAULT 0,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        stock INT DEFAULT 0
       )
     `);
 
@@ -66,20 +51,7 @@ async function initDb() {
         total_amount DECIMAL(10, 2) NOT NULL,
         sale_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         depo_id VARCHAR(50) NOT NULL,
-        synced BOOLEAN DEFAULT FALSE,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-      )
-    `);
-
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS sale_items (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        sale_id VARCHAR(36),
-        product_id INT,
-        quantity INT,
-        price DECIMAL(10, 2),
-        FOREIGN KEY (sale_id) REFERENCES sales(id),
-        FOREIGN KEY (product_id) REFERENCES products(id)
+        synced BOOLEAN DEFAULT FALSE
       )
     `);
 
@@ -90,18 +62,26 @@ async function initDb() {
       )
     `);
 
+    // NEW: Employee table in Depo
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS employees (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(100) NOT NULL,
+        position VARCHAR(50),
+        phone VARCHAR(20),
+        synced BOOLEAN DEFAULT FALSE
+      )
+    `);
+
     isDbReady = true;
-    console.log('Database and tables initialized successfully');
+    console.log('Depo Database ready');
   } catch (err) {
-    console.error('Database initialization failed:', err.message);
-    console.log('Retrying in 5 seconds...');
     setTimeout(initDb, 5000);
   }
 }
 
 initDb();
 
-// Helper to get local setting
 async function getLocalSetting(key) {
   try {
     const [rows] = await pool.query('SELECT setting_value FROM settings WHERE setting_key = ?', [key]);
@@ -109,262 +89,134 @@ async function getLocalSetting(key) {
   } catch (e) { return process.env[key.toUpperCase()]; }
 }
 
-// API to check activation status
+async function checkAuth(req, res, next) {
+  const depo_id = await getLocalSetting('depo_id');
+  if (!depo_id) return next();
+  if (req.signedCookies.auth === 'true') next();
+  else res.status(401).json({ error: 'Unauthorized' });
+}
+
+// API Routes
 app.get('/api/config', async (req, res) => {
-  try {
-    const depo_id = await getLocalSetting('depo_id');
-    const depo_name = await getLocalSetting('depo_name');
-    const authenticated = req.signedCookies.auth === 'true';
-    
-    res.json({
-      activated: !!depo_id,
-      depo_id,
-      depo_name,
-      authenticated
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  const depo_id = await getLocalSetting('depo_id');
+  const depo_name = await getLocalSetting('depo_name');
+  const authenticated = req.signedCookies.auth === 'true';
+  res.json({ activated: !!depo_id, depo_id, depo_name, authenticated });
 });
 
-// API to Activate Depo with Token
 app.post('/api/activate', async (req, res) => {
   const { token } = req.body;
   const centralBaseUrl = (process.env.CENTRAL_URL || 'http://web-pusat:4000/api/receive-sync').replace('/api/receive-sync', '');
-  
   try {
     const response = await fetch(`${centralBaseUrl}/api/check-token?token=${token}`);
-    if (!response.ok) throw new Error('Token tidak valid');
-    
-    const data = await response.json(); // { depo_id, name, db_user, db_pass, admin_user, admin_pass }
-    
-    // 1. Setup local MySQL User
-    if (data.db_user && data.db_pass) {
-      console.log('Provisioning local MySQL user:', data.db_user);
-      const conn = await pool.getConnection();
-      try {
-        await conn.query(`CREATE USER IF NOT EXISTS '${data.db_user}'@'%' IDENTIFIED BY '${data.db_pass}'`);
-        await conn.query(`GRANT ALL PRIVILEGES ON ${dbConfig.database}.* TO '${data.db_user}'@'%'`);
-        await conn.query('FLUSH PRIVILEGES');
-      } finally { conn.release(); }
-    }
-
-    // 2. Save settings locally
+    if (!response.ok) throw new Error('Token Invalid');
+    const data = await response.json();
     await pool.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['depo_id', data.depo_id]);
     await pool.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['depo_name', data.name]);
     await pool.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['depo_token', token]);
-    await pool.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['db_user', data.db_user]);
-    await pool.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['db_pass', data.db_pass]);
     await pool.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['admin_user', data.admin_user]);
     await pool.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['admin_pass', data.admin_pass]);
-    
-    res.json({ success: true, message: 'Activated and provisioned' });
-  } catch (err) {
-    res.status(401).json({ error: err.message });
-  }
+    res.json({ success: true });
+  } catch (err) { res.status(401).json({ error: err.message }); }
 });
 
-// API to Login
 app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
-  const savedUser = await getLocalSetting('admin_user');
-  const savedPass = await getLocalSetting('admin_pass');
-
-  if (username === savedUser && password === savedPass) {
-    res.cookie('auth', 'true', { signed: true, maxAge: 86400000 }); // 24h
+  const u = await getLocalSetting('admin_user');
+  const p = await getLocalSetting('admin_pass');
+  if (username === u && password === p) {
+    res.cookie('auth', 'true', { signed: true, maxAge: 86400000 });
     res.json({ success: true });
-  } else {
-    res.status(401).json({ error: 'Username atau Password salah' });
-  }
+  } else res.status(401).json({ error: 'Wrong credentials' });
 });
 
-// API to Logout
-app.post('/api/logout', (req, res) => {
-  res.clearCookie('auth');
-  res.json({ success: true });
-});
+app.post('/api/logout', (req, res) => { res.clearCookie('auth'); res.json({ success: true }); });
 
-// Middleware to check Authentication
-async function checkAuth(req, res, next) {
-  const depo_id = await getLocalSetting('depo_id');
-  if (!depo_id) return next(); // Not activated yet, allow activation page
-  
-  if (req.signedCookies.auth === 'true') {
-    next();
-  } else {
-    res.status(401).json({ error: 'Unauthorized' });
-  }
-}
-
-// Middleware to check DB readiness
-app.use('/api', (req, res, next) => {
-  if (!isDbReady) {
-    return res.status(503).json({ error: 'Database is still initializing, please try again in a few seconds.' });
-  }
-  next();
-});
-
-// API Routes
-
-// Get all products
+// Inventory & Sales APIs
 app.get('/api/products', checkAuth, async (req, res) => {
-  try {
-    const [rows] = await pool.query('SELECT * FROM products');
-    res.json(rows);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  const [rows] = await pool.query('SELECT * FROM products');
+  res.json(rows);
 });
 
-// Add a product
-app.post('/api/products', checkAuth, async (req, res) => {
-  const { name, price, stock } = req.body;
-  try {
-    const [result] = await pool.query(
-      'INSERT INTO products (name, price, stock) VALUES (?, ?, ?)',
-      [name, price, stock]
-    );
-    res.json({ id: result.insertId, name, price, stock });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Create a sale
 app.post('/api/sales', checkAuth, async (req, res) => {
   const { items, total_amount } = req.body;
   const saleId = crypto.randomUUID();
-  const depoId = await getLocalSetting('depo_id') || 'UNKNOWN_DEPO';
-
-  const connection = await pool.getConnection();
-  try {
-    await connection.beginTransaction();
-
-    await connection.query(
-      'INSERT INTO sales (id, total_amount, depo_id, synced) VALUES (?, ?, ?, ?)',
-      [saleId, total_amount, depoId, false]
-    );
-
-    for (const item of items) {
-      await connection.query(
-        'INSERT INTO sale_items (sale_id, product_id, quantity, price) VALUES (?, ?, ?, ?)',
-        [saleId, item.product_id, item.quantity, item.price]
-      );
-      
-      // Update stock
-      await connection.query(
-        'UPDATE products SET stock = stock - ? WHERE id = ?',
-        [item.quantity, item.product_id]
-      );
-    }
-
-    await connection.commit();
-    res.json({ id: saleId, message: 'Sale recorded successfully' });
-  } catch (err) {
-    await connection.rollback();
-    res.status(500).json({ error: err.message });
-  } finally {
-    connection.release();
-  }
+  const depoId = await getLocalSetting('depo_id');
+  await pool.query('INSERT INTO sales (id, total_amount, depo_id) VALUES (?, ?, ?)', [saleId, total_amount, depoId]);
+  res.json({ success: true });
 });
 
-// Get sales history
 app.get('/api/sales', checkAuth, async (req, res) => {
-  try {
-    const [rows] = await pool.query('SELECT * FROM sales ORDER BY sale_date DESC');
-    res.json(rows);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  const [rows] = await pool.query('SELECT * FROM sales ORDER BY sale_date DESC');
+  res.json(rows);
 });
 
-// Get Sync Status
+// NEW: Employee APIs
+app.get('/api/employees', checkAuth, async (req, res) => {
+  const [rows] = await pool.query('SELECT * FROM employees');
+  res.json(rows);
+});
+
+app.post('/api/employees', checkAuth, async (req, res) => {
+  const { name, position, phone } = req.body;
+  await pool.query('INSERT INTO employees (name, position, phone) VALUES (?, ?, ?)', [name, position, phone]);
+  res.json({ success: true });
+});
+
+app.delete('/api/employees/:id', checkAuth, async (req, res) => {
+  await pool.query('DELETE FROM employees WHERE id = ?', [req.params.id]);
+  res.json({ success: true });
+});
+
 app.get('/api/sync-status', checkAuth, async (req, res) => {
-  try {
-    const depo_id = await getLocalSetting('depo_id') || 'UNKNOWN_DEPO';
-    const [total] = await pool.query('SELECT COUNT(*) as count FROM sales');
-    const [unsynced] = await pool.query('SELECT COUNT(*) as count FROM sales WHERE synced = 0');
-    res.json({
-      total: total[0].count,
-      unsynced: unsynced[0].count,
-      depo_id: depo_id
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  const [s] = await pool.query('SELECT COUNT(*) as count FROM sales WHERE synced = 0');
+  const [e] = await pool.query('SELECT COUNT(*) as count FROM employees WHERE synced = 0');
+  res.json({ unsynced_sales: s[0].count, unsynced_employees: e[0].count });
 });
 
-// API Route for Syncing to Central
+// Sync to Central (Sales + Employees)
 app.post('/api/sync-to-central', checkAuth, async (req, res) => {
   try {
-    const depo_id = await getLocalSetting('depo_id') || 'UNKNOWN_DEPO';
     const depo_token = await getLocalSetting('depo_token');
-    
-    const [rows] = await pool.query('SELECT * FROM sales WHERE synced = 0');
-    if (rows.length === 0) return res.json({ message: 'No new data to sync' });
-
     const centralUrl = (process.env.CENTRAL_URL || 'http://web-pusat:4000/api/receive-sync');
-    
-    const response = await fetch(centralUrl, {
+
+    // 1. Sync Sales
+    const [sales] = await pool.query('SELECT * FROM sales WHERE synced = 0');
+    if (sales.length > 0) {
+      await fetch(centralUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Depo-Token': depo_token },
+        body: JSON.stringify({ sales })
+      });
+      await pool.query('UPDATE sales SET synced = 1 WHERE id IN (?)', [sales.map(s => s.id)]);
+    }
+
+    // 2. Sync Employees
+    const [employees] = await pool.query('SELECT * FROM employees'); // Full sync for simplicity
+    const empUrl = centralUrl.replace('/receive-sync', '/employees-sync');
+    await fetch(empUrl, {
       method: 'POST',
-      headers: { 
-        'Content-Type': 'application/json',
-        'X-Depo-Token': depo_token
-      },
-      body: JSON.stringify({ sales: rows.map(r => ({ ...r, depo_id })) })
+      headers: { 'Content-Type': 'application/json', 'X-Depo-Token': depo_token },
+      body: JSON.stringify({ employees })
     });
+    await pool.query('UPDATE employees SET synced = 1');
 
-    if (response.ok) {
-      const ids = rows.map(r => r.id);
-      await pool.query('UPDATE sales SET synced = 1 WHERE id IN (?)', [ids]);
-      res.json({ message: 'Sync success', count: rows.length });
-    } else {
-      const err = await response.json();
-      throw new Error(err.error || 'Central server rejected sync');
-    }
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// API to Pull Master Data from Central
 app.post('/api/sync-products-from-central', checkAuth, async (req, res) => {
-  try {
-    const depo_token = await getLocalSetting('depo_token');
-    const centralUrl = (process.env.CENTRAL_URL || 'http://web-pusat:4000/api/receive-sync').replace('/receive-sync', '/products');
-    
-    console.log('Fetching master data from:', centralUrl);
-    const response = await fetch(centralUrl, {
-      headers: { 'X-Depo-Token': depo_token }
-    });
-    if (!response.ok) throw new Error('Failed to fetch from central');
-    
-    const products = await response.json();
-    
-    const connection = await pool.getConnection();
-    try {
-      await connection.beginTransaction();
-      for (const p of products) {
-        await connection.query(
-          `INSERT INTO products (id, name, price) VALUES (?, ?, ?) 
-           ON DUPLICATE KEY UPDATE name = VALUES(name), price = VALUES(price)`,
-          [p.id, p.name, p.price]
-        );
-      }
-      await connection.commit();
-      res.json({ message: 'Master data synced', count: products.length });
-    } catch (err) {
-      await connection.rollback();
-      throw err;
-    } finally {
-      connection.release();
-    }
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  const depo_token = await getLocalSetting('depo_token');
+  const centralUrl = (process.env.CENTRAL_URL || 'http://web-pusat:4000/api/receive-sync').replace('/receive-sync', '/products');
+  const r = await fetch(centralUrl, { headers: { 'X-Depo-Token': depo_token } });
+  const products = await r.json();
+  for (const p of products) {
+    await pool.query('INSERT INTO products (id, name, price) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE name=VALUES(name), price=VALUES(price)', [p.id, p.name, p.price]);
   }
+  res.json({ success: true });
 });
 
-// Serve Frontend
+// Frontend
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -372,245 +224,101 @@ app.get('/', (req, res) => {
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Depo Manager | Secure Access</title>
+        <title>Depo Manager | Secure</title>
         <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
         <script src="https://cdn.jsdelivr.net/npm/lucide-static@0.321.0/lib/index.min.js"></script>
         <style>
           :root { --primary: #6366f1; --bg: #0f172a; --card-bg: rgba(30, 41, 59, 0.7); --text: #f8fafc; --text-muted: #94a3b8; --success: #22c55e; --warning: #f59e0b; --danger: #ef4444; --glass-border: rgba(255, 255, 255, 0.1); }
           * { margin: 0; padding: 0; box-sizing: border-box; }
           body { font-family: 'Outfit', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; display: flex; }
-
-          #activation-overlay, #login-overlay { position: fixed; inset: 0; background: var(--bg); z-index: 9999; display: flex; align-items: center; justify-content: center; padding: 20px; }
-          .auth-card { background: var(--card-bg); border: 1px solid var(--glass-border); padding: 3rem; border-radius: 24px; max-width: 400px; width: 100%; text-align: center; backdrop-filter: blur(20px); }
-          
+          #activation-overlay, #login-overlay { position: fixed; inset: 0; background: var(--bg); z-index: 9999; display: flex; align-items: center; justify-content: center; }
+          .auth-card { background: var(--card-bg); border: 1px solid var(--glass-border); padding: 3rem; border-radius: 24px; text-align: center; width: 400px; backdrop-filter: blur(20px); }
           .sidebar { width: 260px; background: rgba(15, 23, 42, 0.95); border-right: 1px solid var(--glass-border); display: flex; flex-direction: column; padding: 2rem 1.5rem; position: fixed; height: 100vh; }
-          .logo { font-size: 1.5rem; font-weight: 700; margin-bottom: 3rem; display: flex; align-items: center; gap: 12px; background: linear-gradient(to right, #818cf8, #c084fc); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-          .nav-item { padding: 12px 16px; border-radius: 12px; color: var(--text-muted); text-decoration: none; margin-bottom: 8px; display: flex; align-items: center; gap: 12px; transition: all 0.3s; cursor: pointer; }
+          .logo { font-size: 1.5rem; font-weight: 700; margin-bottom: 3rem; background: linear-gradient(to right, #818cf8, #c084fc); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+          .nav-item { padding: 12px 16px; border-radius: 12px; color: var(--text-muted); margin-bottom: 8px; display: flex; align-items: center; gap: 12px; cursor: pointer; transition: 0.3s; }
           .nav-item:hover, .nav-item.active { background: rgba(99, 102, 241, 0.1); color: var(--text); }
-          
-          .main { flex: 1; margin-left: 260px; padding: 2.5rem; max-width: 1200px; }
+          .main { flex: 1; margin-left: 260px; padding: 2.5rem; }
           header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 3rem; }
-          .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1.5rem; margin-bottom: 3rem; }
-          .stat-card { background: var(--card-bg); backdrop-filter: blur(12px); border: 1px solid var(--glass-border); padding: 1.5rem; border-radius: 20px; transition: transform 0.3s; }
-          .stat-card:hover { transform: translateY(-5px); }
-          .stat-label { color: var(--text-muted); font-size: 0.875rem; margin-bottom: 0.5rem; }
-          .stat-value { font-size: 1.75rem; font-weight: 700; }
           .glass-panel { background: var(--card-bg); backdrop-filter: blur(12px); border: 1px solid var(--glass-border); border-radius: 24px; padding: 2rem; margin-bottom: 2rem; }
-          .btn { background: var(--primary); color: white; border: none; padding: 12px 24px; border-radius: 12px; font-weight: 600; cursor: pointer; transition: all 0.3s; display: inline-flex; align-items: center; gap: 8px; }
-          .btn:hover { background: #4f46e5; transform: translateY(-2px); }
+          .btn { background: var(--primary); color: white; border: none; padding: 12px 24px; border-radius: 12px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; }
           input, select { background: rgba(15, 23, 42, 0.5); border: 1px solid var(--glass-border); padding: 12px; border-radius: 10px; color: white; width: 100%; margin-bottom: 1rem; }
-          table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+          table { width: 100%; border-collapse: collapse; }
           th { text-align: left; padding: 12px; color: var(--text-muted); border-bottom: 1px solid var(--glass-border); }
           td { padding: 16px 12px; border-bottom: 1px solid rgba(255,255,255,0.05); }
-          .badge { padding: 4px 12px; border-radius: 99px; font-size: 0.75rem; font-weight: 600; }
-          .badge-sync { background: rgba(34, 197, 94, 0.1); color: var(--success); }
-          .badge-pending { background: rgba(245, 158, 11, 0.1); color: var(--warning); }
           #notification { position: fixed; bottom: 2rem; right: 2rem; padding: 1rem 2rem; border-radius: 12px; display: none; z-index: 10000; }
         </style>
     </head>
     <body>
-        <div id="activation-overlay" style="display: none;">
-            <div class="auth-card">
-                <i data-lucide="shield-check" style="width: 50px; height: 50px; color: var(--primary); margin-bottom: 1rem;"></i>
-                <h2>Aktivasi Server</h2>
-                <input type="text" id="activation-token" placeholder="Token Access">
-                <button class="btn" onclick="activateApp()" style="width: 100%; justify-content: center;">Aktifkan</button>
-            </div>
-        </div>
-
-        <div id="login-overlay" style="display: none;">
-            <div class="auth-card">
-                <i data-lucide="lock" style="width: 50px; height: 50px; color: var(--warning); margin-bottom: 1rem;"></i>
-                <h2>Login Dashboard</h2>
-                <input type="text" id="login-user" placeholder="Username">
-                <input type="password" id="login-pass" placeholder="Password">
-                <button class="btn" onclick="loginApp()" style="width: 100%; justify-content: center; background: var(--success);">Masuk</button>
-            </div>
-        </div>
-
+        <div id="activation-overlay" style="display: none;"><div class="auth-card"><h2>Aktivasi</h2><input id="activation-token" placeholder="Token"><button class="btn" onclick="activateApp()">Aktifkan</button></div></div>
+        <div id="login-overlay" style="display: none;"><div class="auth-card"><h2>Login</h2><input id="login-user" placeholder="User"><input type="password" id="login-pass" placeholder="Pass"><button class="btn" onclick="loginApp()">Masuk</button></div></div>
         <nav class="sidebar">
-            <div class="logo"><i data-lucide="layers"></i> DEPO CORE</div>
+            <div class="logo">DEPO CORE</div>
             <div class="nav-item active" onclick="showSection('dashboard')"><i data-lucide="layout-dashboard"></i> Dashboard</div>
             <div class="nav-item" onclick="showSection('inventory')"><i data-lucide="package"></i> Inventory</div>
+            <div class="nav-item" onclick="showSection('employees')"><i data-lucide="users"></i> Karyawan</div>
             <div class="nav-item" onclick="showSection('sales')"><i data-lucide="shopping-cart"></i> Sales</div>
             <div class="nav-item" onclick="syncData()"><i data-lucide="refresh-cw"></i> Force Sync</div>
-            <div style="margin-top: auto;">
-              <div class="nav-item" onclick="logoutApp()" style="color: var(--danger);"><i data-lucide="log-out"></i> Logout</div>
-            </div>
+            <div style="margin-top:auto"><div class="nav-item" onclick="logoutApp()" style="color:var(--danger)"><i data-lucide="log-out"></i> Logout</div></div>
         </nav>
-
         <div class="main">
-            <header>
-                <div>
-                    <h1 id="page-title">Dashboard</h1>
-                    <p id="depo-info" style="color: var(--primary); font-weight: 600;"></p>
-                </div>
-                <div class="btn" onclick="showSection('sales')"><i data-lucide="plus"></i> Transaksi Baru</div>
-            </header>
-
+            <header><h1 id="page-title">Dashboard</h1><p id="depo-info" style="color:var(--primary)"></p></header>
             <div id="section-dashboard">
-                <div class="stats-grid">
-                    <div class="stat-card"><div class="stat-label">Total Penjualan</div><div id="stat-total-sales" class="stat-value">Rp 0</div></div>
-                    <div class="stat-card"><div class="stat-label">Produk Terdaftar</div><div id="stat-products" class="stat-value">0</div></div>
-                    <div class="stat-card"><div class="stat-label">Belum Tersync</div><div id="stat-pending-sync" class="stat-value">0</div></div>
-                </div>
-                <div class="glass-panel">
-                    <h2>Transaksi Terakhir</h2>
-                    <table id="sales-table"><thead><tr><th>ID</th><th>Tanggal</th><th>Total</th><th>Status</th></tr></thead><tbody></tbody></table>
-                </div>
+                <div class="glass-panel"><h2>Transaksi Terakhir</h2><table id="sales-table"><thead><tr><th>ID</th><th>Total</th><th>Status</th></tr></thead><tbody></tbody></table></div>
             </div>
-
-            <div id="section-inventory" style="display: none;">
-                <div class="glass-panel" style="text-align: center; padding: 3rem;">
-                    <h2>Master Data Produk</h2>
-                    <button class="btn" onclick="syncMasterData()"><i data-lucide="refresh-cw"></i> Sync dari Pusat</button>
-                </div>
-                <div class="glass-panel">
-                    <h2>Daftar Produk Lokal</h2>
-                    <table id="products-table"><thead><tr><th>ID</th><th>Nama</th><th>Harga</th><th>Stok</th></tr></thead><tbody></tbody></table>
-                </div>
+            <div id="section-inventory" style="display:none">
+                <div class="glass-panel" style="text-align:center"><button class="btn" onclick="syncMasterData()">Sync Produk dari Pusat</button></div>
+                <div class="glass-panel"><h2>Daftar Produk</h2><table id="products-table"><thead><tr><th>Nama</th><th>Harga</th></tr></thead><tbody></tbody></table></div>
             </div>
-
-            <div id="section-sales" style="display: none;">
+            <div id="section-employees" style="display:none">
                 <div class="glass-panel">
-                    <h2>Input Penjualan</h2>
-                    <div style="display: flex; gap: 10px;"><select id="sale-product-select" style="flex: 2;"></select><input type="number" id="sale-qty" placeholder="Qty" style="flex: 1;"><button class="btn" onclick="addToCart()">Add</button></div>
-                    <div style="margin-top: 2rem;"><h3>Keranjang</h3><table id="cart-table"><thead><tr><th>Produk</th><th>Qty</th><th>Harga</th><th>Subtotal</th></tr></thead><tbody></tbody></table>
-                        <div style="margin-top: 1.5rem; text-align: right;"><h3 id="cart-total">Total: Rp 0</h3><button class="btn" onclick="checkout()" style="background: var(--success); margin-top: 1rem;">Checkout</button></div>
-                    </div>
+                    <h2>Input Karyawan</h2>
+                    <input id="e-name" placeholder="Nama"><input id="e-pos" placeholder="Posisi"><input id="e-phone" placeholder="HP">
+                    <button class="btn" onclick="addEmployee()">Tambah</button>
                 </div>
+                <div class="glass-panel"><h2>Daftar Karyawan Lokal</h2><table id="emp-table"><thead><tr><th>Nama</th><th>Posisi</th><th>HP</th></tr></thead><tbody></tbody></table></div>
+            </div>
+            <div id="section-sales" style="display:none">
+                <div class="glass-panel"><h2>Input Penjualan</h2><select id="sale-product-select"></select><input type="number" id="sale-qty" placeholder="Qty"><button class="btn" onclick="addToCart()">Add</button><div id="cart-total"></div><button class="btn" onclick="checkout()">Checkout</button></div>
             </div>
         </div>
-
         <div id="notification"></div>
-
         <script>
-            let cart = [];
             let products = [];
-
             async function initApp() {
-                const configRes = await fetch('/api/config');
-                const config = await configRes.json();
-                
-                if (!config.activated) {
-                    document.getElementById('activation-overlay').style.display = 'flex';
-                    return;
-                }
-                
-                if (!config.authenticated) {
-                    document.getElementById('login-overlay').style.display = 'flex';
-                    return;
-                }
-
-                document.getElementById('depo-info').innerText = \`\${config.depo_name} | ID: \${config.depo_id}\`;
+                const r = await fetch('/api/config'); const c = await r.json();
+                if(!c.activated) { document.getElementById('activation-overlay').style.display='flex'; return; }
+                if(!c.authenticated) { document.getElementById('login-overlay').style.display='flex'; return; }
+                document.getElementById('depo-info').innerText = c.depo_name; fetchData();
+            }
+            async function fetchData() {
+                const [pr, sr, er] = await Promise.all([fetch('/api/products'), fetch('/api/sales'), fetch('/api/employees')]);
+                products = await pr.json();
+                const st = document.querySelector('#sales-table tbody'); st.innerHTML = '';
+                (await sr.json()).forEach(s => st.innerHTML += \`<tr><td>\${s.id.slice(0,8)}</td><td>Rp \${parseFloat(s.total_amount).toLocaleString()}</td><td>\${s.synced?'OK':'Wait'}</td></tr>\`);
+                const pt = document.querySelector('#products-table tbody'); pt.innerHTML = '';
+                const ps = document.getElementById('sale-product-select'); ps.innerHTML = '';
+                products.forEach(p => { 
+                    pt.innerHTML += \`<tr><td>\${p.name}</td><td>Rp \${parseFloat(p.price).toLocaleString()}</td></tr>\`; 
+                    ps.innerHTML += \`<option value="\${p.id}">\${p.name}</option>\`;
+                });
+                const et = document.querySelector('#emp-table tbody'); et.innerHTML = '';
+                (await er.json()).forEach(e => et.innerHTML += \`<tr><td>\${e.name}</td><td>\${e.position}</td><td>\${e.phone}</td></tr>\`);
+                lucide.createIcons();
+            }
+            async function addEmployee() {
+                const name = document.getElementById('e-name').value;
+                const position = document.getElementById('e-pos').value;
+                const phone = document.getElementById('e-phone').value;
+                await fetch('/api/employees', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name, position, phone}) });
                 fetchData();
             }
-
-            async function fetchData() {
-                try {
-                    const [prodRes, salesRes, syncRes] = await Promise.all([
-                        fetch('/api/products'), 
-                        fetch('/api/sales'), 
-                        fetch('/api/sync-status')
-                    ]);
-
-                    if (prodRes.status === 401 || salesRes.status === 401) {
-                        document.getElementById('login-overlay').style.display = 'flex';
-                        return;
-                    }
-
-                    products = await prodRes.json();
-                    updateUI(products, await salesRes.json(), await syncRes.json());
-                    if (typeof lucide !== 'undefined') lucide.createIcons();
-                } catch (err) {
-                    notify('Error koneksi', 'danger');
-                }
-            }
-
-            async function activateApp() {
-                const token = document.getElementById('activation-token').value;
-                const res = await fetch('/api/activate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) });
-                if (res.ok) { notify('Berhasil!', 'success'); setTimeout(() => location.reload(), 1500); }
-                else { notify('Token salah', 'danger'); }
-            }
-
-            async function loginApp() {
-                const username = document.getElementById('login-user').value;
-                const password = document.getElementById('login-pass').value;
-                const res = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }) });
-                if (res.ok) { location.reload(); }
-                else { notify('User/Pass salah', 'danger'); }
-            }
-
-            async function logoutApp() {
-                try {
-                    await fetch('/api/logout', { method: 'POST' });
-                } catch(e) {}
-                location.reload();
-            }
-
-            function updateUI(products, sales, syncStatus) {
-                document.getElementById('stat-products').innerText = products.length;
-                document.getElementById('stat-pending-sync').innerText = syncStatus.unsynced;
-                document.getElementById('stat-total-sales').innerText = 'Rp ' + sales.reduce((acc, s) => acc + parseFloat(s.total_amount), 0).toLocaleString();
-
-                const pTable = document.querySelector('#products-table tbody');
-                const pSelect = document.getElementById('sale-product-select');
-                pTable.innerHTML = ''; pSelect.innerHTML = '<option value="">Pilih...</option>';
-                products.forEach(p => {
-                    pTable.innerHTML += \`<tr><td>\${p.id}</td><td>\${p.name}</td><td>Rp \${parseFloat(p.price).toLocaleString()}</td><td>\${p.stock}</td></tr>\`;
-                    pSelect.innerHTML += \`<option value="\${p.id}">\${p.name}</option>\`;
-                });
-
-                const sTable = document.querySelector('#sales-table tbody');
-                sTable.innerHTML = '';
-                sales.slice(0, 10).forEach(s => {
-                    const cls = s.synced ? 'badge-sync' : 'badge-pending';
-                    sTable.innerHTML += \`<tr><td>\${s.id.slice(0,8)}</td><td>\${new Date(s.sale_date).toLocaleDateString()}</td><td>Rp \${parseFloat(s.total_amount).toLocaleString()}</td><td><span class="badge \${cls}">\${s.synced ? 'OK' : 'Wait'}</span></td></tr>\`;
-                });
-            }
-
-            function showSection(name) {
-                ['dashboard', 'inventory', 'sales'].forEach(s => document.getElementById('section-' + s).style.display = s === name ? 'block' : 'none');
-                document.getElementById('page-title').innerText = name.toUpperCase();
-            }
-
-            async function syncMasterData() {
-                notify('Syncing...', 'warning');
-                const res = await fetch('/api/sync-products-from-central', { method: 'POST' });
-                if (res.ok) { notify('Success!', 'success'); fetchData(); }
-            }
-
-            function addToCart() {
-                const p = products.find(i => i.id == document.getElementById('sale-product-select').value);
-                const q = parseInt(document.getElementById('sale-qty').value);
-                if (p && q > 0) { cart.push({ ...p, product_id: p.id, quantity: q, subtotal: p.price * q }); updateCartUI(); }
-            }
-
-            function updateCartUI() {
-                const b = document.querySelector('#cart-table tbody'); b.innerHTML = '';
-                let t = 0; cart.forEach(i => { t += i.subtotal; b.innerHTML += \`<tr><td>\${i.name}</td><td>\${i.quantity}</td><td>\${i.price}</td><td>\${i.subtotal}</td></tr>\`; });
-                document.getElementById('cart-total').innerText = 'Total: Rp ' + t.toLocaleString();
-            }
-
-            async function checkout() {
-                const t = cart.reduce((a, b) => a + b.subtotal, 0);
-                const res = await fetch('/api/sales', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items: cart, total_amount: t }) });
-                if (res.ok) { cart = []; updateCartUI(); fetchData(); showSection('dashboard'); }
-            }
-
-            async function syncData() {
-                notify('Pushing...', 'warning');
-                const res = await fetch('/api/sync-to-central', { method: 'POST' });
-                if (res.ok) { fetchData(); notify('Synced!', 'success'); }
-            }
-
-            function notify(m, t) {
-                const n = document.getElementById('notification'); n.innerText = m; n.style.display = 'block';
-                n.style.background = t === 'success' ? 'var(--success)' : 'var(--danger)';
-                setTimeout(() => n.style.display = 'none', 3000);
-            }
-
+            async function syncData() { notify('Syncing...', 'warning'); await fetch('/api/sync-to-central', {method:'POST'}); fetchData(); notify('Success!', 'success'); }
+            async function syncMasterData() { await fetch('/api/sync-products-from-central', {method:'POST'}); fetchData(); }
+            function showSection(n) { ['dashboard','inventory','employees','sales'].forEach(s => document.getElementById('section-'+s).style.display = s===n?'block':'none'); }
+            function notify(m,t) { const n=document.getElementById('notification'); n.innerText=m; n.style.display='block'; n.style.background=t==='success'?'var(--success)':'var(--warning)'; setTimeout(()=>n.style.display='none',3000); }
+            async function activateApp() { const token=document.getElementById('activation-token').value; const r=await fetch('/api/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})}); if(r.ok) location.reload(); }
+            async function loginApp() { const username=document.getElementById('login-user').value; const password=document.getElementById('login-pass').value; const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,password})}); if(r.ok) location.reload(); }
+            function logoutApp() { fetch('/api/logout',{method:'POST'}).then(()=>location.reload()); }
             initApp();
         </script>
     </body>
@@ -618,7 +326,4 @@ app.get('/', (req, res) => {
   `);
 });
 
-app.listen(port, () => {
-  console.log(`Server berjalan di http://localhost:${port}`);
-});
-
+app.listen(port, () => console.log('Depo Server running'));
