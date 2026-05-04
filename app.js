@@ -148,6 +148,14 @@ app.post('/api/sync-products-from-central', checkAuth, async (req, res) => {
   const depo_token = await getLocalSetting('depo_token');
   const r = await fetch((process.env.CENTRAL_URL || 'http://web-pusat:4000/api/receive-sync').replace('/receive-sync', '/products'), { headers: { 'X-Depo-Token': depo_token } });
   const products = await r.json();
+  
+  const incomingIds = products.map(p => p.id);
+  if (incomingIds.length > 0) {
+    await pool.query('DELETE FROM products WHERE id NOT IN (?)', [incomingIds]);
+  } else {
+    await pool.query('DELETE FROM products');
+  }
+
   for (const p of products) await pool.query('INSERT INTO products (id, name, price) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE name=VALUES(name), price=VALUES(price)', [p.id, p.name, p.price]);
   res.json({ success: true });
 });
