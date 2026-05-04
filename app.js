@@ -354,7 +354,7 @@ app.post('/api/sync-products-from-central', async (req, res) => {
 });
 
 // Serve Frontend
-app.get('/', checkAuth, (req, res) => {
+app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
     <html lang="id">
