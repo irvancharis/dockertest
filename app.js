@@ -26,16 +26,41 @@ let isDbReady = false;
 
 async function initDb() {
   try {
-    const connection = await mysql.createConnection({
+    // 1. Initial connection as root to load specialized settings
+    const tempConn = await mysql.createConnection({
       host: dbConfig.host,
       user: dbConfig.user,
       password: dbConfig.password,
     });
-    await connection.query(`CREATE DATABASE IF NOT EXISTS ${dbConfig.database}`);
-    await connection.end();
+    await tempConn.query(`CREATE DATABASE IF NOT EXISTS ${dbConfig.database}`);
+    await tempConn.query(`USE ${dbConfig.database}`);
+    await tempConn.query(`
+      CREATE TABLE IF NOT EXISTS settings (
+        setting_key VARCHAR(50) PRIMARY KEY,
+        setting_value TEXT
+      )
+    `);
 
-    pool = mysql.createPool({ ...dbConfig, waitForConnections: true, connectionLimit: 10 });
+    // Check for specialized credentials
+    const [rows] = await tempConn.query('SELECT setting_key, setting_value FROM settings WHERE setting_key IN ("db_user", "db_pass")');
+    const settings = {};
+    rows.forEach(r => settings[r.setting_key] = r.setting_value);
+    await tempConn.end();
 
+    // 2. Create the ACTUAL pool using specialized credentials if available
+    const finalUser = settings.db_user || dbConfig.user;
+    const finalPass = settings.db_pass || dbConfig.password;
+
+    console.log(`Initializing Pool as: ${finalUser}`);
+    pool = mysql.createPool({
+      ...dbConfig,
+      user: finalUser,
+      password: finalPass,
+      waitForConnections: true,
+      connectionLimit: 10
+    });
+
+    // 3. Initialize other tables
     await pool.query(`
       CREATE TABLE IF NOT EXISTS products (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -56,14 +81,6 @@ async function initDb() {
     `);
 
     await pool.query(`
-      CREATE TABLE IF NOT EXISTS settings (
-        setting_key VARCHAR(50) PRIMARY KEY,
-        setting_value TEXT
-      )
-    `);
-
-    // NEW: Employee table in Depo
-    await pool.query(`
       CREATE TABLE IF NOT EXISTS employees (
         id INT AUTO_INCREMENT PRIMARY KEY,
         name VARCHAR(100) NOT NULL,
@@ -74,8 +91,9 @@ async function initDb() {
     `);
 
     isDbReady = true;
-    console.log('Depo Database ready');
+    console.log('Depo Database ready with specialized credentials');
   } catch (err) {
+    console.error('DB Init Error:', err.message);
     setTimeout(initDb, 5000);
   }
 }
@@ -111,12 +129,28 @@ app.post('/api/activate', async (req, res) => {
     const response = await fetch(`${centralBaseUrl}/api/check-token?token=${token}`);
     if (!response.ok) throw new Error('Token Invalid');
     const data = await response.json();
+
+    // 1. Setup specialized MySQL user locally
+    if (data.db_user && data.db_pass) {
+      const conn = await mysql.createConnection({ host: dbConfig.host, user: dbConfig.user, password: dbConfig.password });
+      await conn.query(`CREATE USER IF NOT EXISTS '${data.db_user}'@'%' IDENTIFIED BY '${data.db_pass}'`);
+      await conn.query(`GRANT ALL PRIVILEGES ON ${dbConfig.database}.* TO '${data.db_user}'@'%'`);
+      await conn.query('FLUSH PRIVILEGES');
+      await conn.end();
+    }
+
+    // 2. Save settings
     await pool.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['depo_id', data.depo_id]);
     await pool.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['depo_name', data.name]);
     await pool.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['depo_token', token]);
+    await pool.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['db_user', data.db_user]);
+    await pool.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['db_pass', data.db_pass]);
     await pool.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['admin_user', data.admin_user]);
     await pool.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['admin_pass', data.admin_pass]);
-    res.json({ success: true });
+    
+    // Reboot server to apply new credentials
+    res.json({ success: true, message: 'Activated. System will reboot to apply credentials.' });
+    setTimeout(() => process.exit(0), 1000); 
   } catch (err) { res.status(401).json({ error: err.message }); }
 });
 
@@ -174,13 +208,10 @@ app.get('/api/sync-status', checkAuth, async (req, res) => {
   res.json({ unsynced_sales: s[0].count, unsynced_employees: e[0].count });
 });
 
-// Sync to Central (Sales + Employees)
 app.post('/api/sync-to-central', checkAuth, async (req, res) => {
   try {
     const depo_token = await getLocalSetting('depo_token');
     const centralUrl = (process.env.CENTRAL_URL || 'http://web-pusat:4000/api/receive-sync');
-
-    // 1. Sync Sales
     const [sales] = await pool.query('SELECT * FROM sales WHERE synced = 0');
     if (sales.length > 0) {
       await fetch(centralUrl, {
@@ -190,9 +221,7 @@ app.post('/api/sync-to-central', checkAuth, async (req, res) => {
       });
       await pool.query('UPDATE sales SET synced = 1 WHERE id IN (?)', [sales.map(s => s.id)]);
     }
-
-    // 2. Sync Employees
-    const [employees] = await pool.query('SELECT * FROM employees'); // Full sync for simplicity
+    const [employees] = await pool.query('SELECT * FROM employees');
     const empUrl = centralUrl.replace('/receive-sync', '/employees-sync');
     await fetch(empUrl, {
       method: 'POST',
@@ -200,7 +229,6 @@ app.post('/api/sync-to-central', checkAuth, async (req, res) => {
       body: JSON.stringify({ employees })
     });
     await pool.query('UPDATE employees SET synced = 1');
-
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -224,7 +252,7 @@ app.get('/', (req, res) => {
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Depo Manager | Secure</title>
+        <title>Depo Manager | Secure Access</title>
         <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
         <script src="https://cdn.jsdelivr.net/npm/lucide-static@0.321.0/lib/index.min.js"></script>
         <style>
@@ -249,8 +277,8 @@ app.get('/', (req, res) => {
         </style>
     </head>
     <body>
-        <div id="activation-overlay" style="display: none;"><div class="auth-card"><h2>Aktivasi</h2><input id="activation-token" placeholder="Token"><button class="btn" onclick="activateApp()">Aktifkan</button></div></div>
-        <div id="login-overlay" style="display: none;"><div class="auth-card"><h2>Login</h2><input id="login-user" placeholder="User"><input type="password" id="login-pass" placeholder="Pass"><button class="btn" onclick="loginApp()">Masuk</button></div></div>
+        <div id="activation-overlay" style="display: none;"><div class="auth-card"><h2>Aktivasi</h2><input id="activation-token" placeholder="Token Access"><button class="btn" onclick="activateApp()">Aktifkan</button></div></div>
+        <div id="login-overlay" style="display: none;"><div class="auth-card"><h2>Login</h2><input id="login-user" placeholder="Username"><input type="password" id="login-pass" placeholder="Password"><button class="btn" onclick="loginApp()">Masuk</button></div></div>
         <nav class="sidebar">
             <div class="logo">DEPO CORE</div>
             <div class="nav-item active" onclick="showSection('dashboard')"><i data-lucide="layout-dashboard"></i> Dashboard</div>
@@ -261,7 +289,7 @@ app.get('/', (req, res) => {
             <div style="margin-top:auto"><div class="nav-item" onclick="logoutApp()" style="color:var(--danger)"><i data-lucide="log-out"></i> Logout</div></div>
         </nav>
         <div class="main">
-            <header><h1 id="page-title">Dashboard</h1><p id="depo-info" style="color:var(--primary)"></p></header>
+            <header><h1 id="page-title">Dashboard</h1><p id="depo-info" style="color:var(--primary); font-weight: 600;"></p></header>
             <div id="section-dashboard">
                 <div class="glass-panel"><h2>Transaksi Terakhir</h2><table id="sales-table"><thead><tr><th>ID</th><th>Total</th><th>Status</th></tr></thead><tbody></tbody></table></div>
             </div>
@@ -272,13 +300,13 @@ app.get('/', (req, res) => {
             <div id="section-employees" style="display:none">
                 <div class="glass-panel">
                     <h2>Input Karyawan</h2>
-                    <input id="e-name" placeholder="Nama"><input id="e-pos" placeholder="Posisi"><input id="e-phone" placeholder="HP">
-                    <button class="btn" onclick="addEmployee()">Tambah</button>
+                    <input id="e-name" placeholder="Nama"><input id="e-pos" placeholder="Posisi"><input id="e-phone" placeholder="No. HP">
+                    <button class="btn" onclick="addEmployee()">Tambah Karyawan</button>
                 </div>
                 <div class="glass-panel"><h2>Daftar Karyawan Lokal</h2><table id="emp-table"><thead><tr><th>Nama</th><th>Posisi</th><th>HP</th></tr></thead><tbody></tbody></table></div>
             </div>
             <div id="section-sales" style="display:none">
-                <div class="glass-panel"><h2>Input Penjualan</h2><select id="sale-product-select"></select><input type="number" id="sale-qty" placeholder="Qty"><button class="btn" onclick="addToCart()">Add</button><div id="cart-total"></div><button class="btn" onclick="checkout()">Checkout</button></div>
+                <div class="glass-panel"><h2>Input Penjualan</h2><select id="sale-product-select"></select><input type="number" id="sale-qty" placeholder="Qty"><button class="btn" onclick="addToCart()">Add to Cart</button><div id="cart-total" style="margin-top: 1rem; font-weight: 600;"></div><button class="btn" onclick="checkout()" style="background: var(--success); margin-top: 1rem;">Checkout</button></div>
             </div>
         </div>
         <div id="notification"></div>
@@ -288,36 +316,39 @@ app.get('/', (req, res) => {
                 const r = await fetch('/api/config'); const c = await r.json();
                 if(!c.activated) { document.getElementById('activation-overlay').style.display='flex'; return; }
                 if(!c.authenticated) { document.getElementById('login-overlay').style.display='flex'; return; }
-                document.getElementById('depo-info').innerText = c.depo_name; fetchData();
+                document.getElementById('depo-info').innerText = c.depo_name + ' | ID: ' + c.depo_id; fetchData();
             }
             async function fetchData() {
-                const [pr, sr, er] = await Promise.all([fetch('/api/products'), fetch('/api/sales'), fetch('/api/employees')]);
-                products = await pr.json();
-                const st = document.querySelector('#sales-table tbody'); st.innerHTML = '';
-                (await sr.json()).forEach(s => st.innerHTML += \`<tr><td>\${s.id.slice(0,8)}</td><td>Rp \${parseFloat(s.total_amount).toLocaleString()}</td><td>\${s.synced?'OK':'Wait'}</td></tr>\`);
-                const pt = document.querySelector('#products-table tbody'); pt.innerHTML = '';
-                const ps = document.getElementById('sale-product-select'); ps.innerHTML = '';
-                products.forEach(p => { 
-                    pt.innerHTML += \`<tr><td>\${p.name}</td><td>Rp \${parseFloat(p.price).toLocaleString()}</td></tr>\`; 
-                    ps.innerHTML += \`<option value="\${p.id}">\${p.name}</option>\`;
-                });
-                const et = document.querySelector('#emp-table tbody'); et.innerHTML = '';
-                (await er.json()).forEach(e => et.innerHTML += \`<tr><td>\${e.name}</td><td>\${e.position}</td><td>\${e.phone}</td></tr>\`);
-                lucide.createIcons();
+                try {
+                    const [pr, sr, er] = await Promise.all([fetch('/api/products'), fetch('/api/sales'), fetch('/api/employees')]);
+                    if (pr.status === 401) { location.reload(); return; }
+                    products = await pr.json();
+                    const st = document.querySelector('#sales-table tbody'); st.innerHTML = '';
+                    (await sr.json()).forEach(s => st.innerHTML += \`<tr><td>\${s.id.slice(0,8)}</td><td>Rp \${parseFloat(s.total_amount).toLocaleString()}</td><td>\${s.synced?'OK':'Wait'}</td></tr>\`);
+                    const pt = document.querySelector('#products-table tbody'); pt.innerHTML = '';
+                    const ps = document.getElementById('sale-product-select'); ps.innerHTML = '';
+                    products.forEach(p => { 
+                        pt.innerHTML += \`<tr><td>\${p.name}</td><td>Rp \${parseFloat(p.price).toLocaleString()}</td></tr>\`; 
+                        ps.innerHTML += \`<option value="\${p.id}">\${p.name}</option>\`;
+                    });
+                    const et = document.querySelector('#emp-table tbody'); et.innerHTML = '';
+                    (await er.json()).forEach(e => et.innerHTML += \`<tr><td>\${e.name}</td><td>\${e.position}</td><td>\${e.phone}</td></tr>\`);
+                    lucide.createIcons();
+                } catch(e) { notify('Gagal memuat data', 'danger'); }
             }
             async function addEmployee() {
                 const name = document.getElementById('e-name').value;
                 const position = document.getElementById('e-pos').value;
                 const phone = document.getElementById('e-phone').value;
                 await fetch('/api/employees', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name, position, phone}) });
-                fetchData();
+                fetchData(); notify('Karyawan ditambahkan', 'success');
             }
-            async function syncData() { notify('Syncing...', 'warning'); await fetch('/api/sync-to-central', {method:'POST'}); fetchData(); notify('Success!', 'success'); }
-            async function syncMasterData() { await fetch('/api/sync-products-from-central', {method:'POST'}); fetchData(); }
-            function showSection(n) { ['dashboard','inventory','employees','sales'].forEach(s => document.getElementById('section-'+s).style.display = s===n?'block':'none'); }
-            function notify(m,t) { const n=document.getElementById('notification'); n.innerText=m; n.style.display='block'; n.style.background=t==='success'?'var(--success)':'var(--warning)'; setTimeout(()=>n.style.display='none',3000); }
-            async function activateApp() { const token=document.getElementById('activation-token').value; const r=await fetch('/api/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})}); if(r.ok) location.reload(); }
-            async function loginApp() { const username=document.getElementById('login-user').value; const password=document.getElementById('login-pass').value; const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,password})}); if(r.ok) location.reload(); }
+            async function syncData() { notify('Syncing...', 'warning'); const r = await fetch('/api/sync-to-central', {method:'POST'}); if(r.ok) { fetchData(); notify('Synced!', 'success'); } else { notify('Sync Gagal', 'danger'); } }
+            async function syncMasterData() { notify('Syncing Produk...', 'warning'); await fetch('/api/sync-products-from-central', {method:'POST'}); fetchData(); notify('Master Data Terupdate', 'success'); }
+            function showSection(n) { ['dashboard','inventory','employees','sales'].forEach(s => document.getElementById('section-'+s).style.display = s===n?'block':'none'); document.getElementById('page-title').innerText = n.toUpperCase(); }
+            function notify(m,t) { const n=document.getElementById('notification'); n.innerText=m; n.style.display='block'; n.style.background=t==='success'?'var(--success)':'var(--danger)'; setTimeout(()=>n.style.display='none',3000); }
+            async function activateApp() { const token=document.getElementById('activation-token').value; notify('Mengaktifkan...', 'warning'); const r=await fetch('/api/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})}); if(r.ok) { notify('Sukses! Restarting...', 'success'); setTimeout(()=>location.reload(), 2000); } else { notify('Token salah', 'danger'); } }
+            async function loginApp() { const username=document.getElementById('login-user').value; const password=document.getElementById('login-pass').value; const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,password})}); if(r.ok) location.reload(); else notify('Login Gagal', 'danger'); }
             function logoutApp() { fetch('/api/logout',{method:'POST'}).then(()=>location.reload()); }
             initApp();
         </script>
@@ -326,4 +357,4 @@ app.get('/', (req, res) => {
   `);
 });
 
-app.listen(port, () => console.log('Depo Server running'));
+app.listen(port, () => console.log('Depo Server running on port ' + port));
