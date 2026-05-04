@@ -87,6 +87,16 @@ async function initDb() {
       )
     `);
 
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS product_assignments (
+        depo_id VARCHAR(50),
+        product_id INT,
+        PRIMARY KEY (depo_id, product_id),
+        FOREIGN KEY (depo_id) REFERENCES depos_master(depo_id) ON DELETE CASCADE,
+        FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+      )
+    `);
+
     isDbReady = true;
     console.log('Central Database ready');
   } catch (err) {
@@ -119,15 +129,38 @@ async function checkDepoToken(req, res, next) {
 app.get('/api/products', checkDepoToken, async (req, res) => {
   if (!isDbReady) return res.status(503).json({ error: 'DB not ready' });
   try {
+    // ONLY return products assigned to this depo
     const [rows] = await pool.query(`
       SELECT p.id, p.name, COALESCE(dp.price, p.price) as price 
       FROM products p 
+      JOIN product_assignments pa ON p.id = pa.product_id
       LEFT JOIN depo_prices dp ON p.id = dp.product_id AND dp.depo_id = ?
-    `, [req.depo.depo_id]);
+      WHERE pa.depo_id = ?
+    `, [req.depo.depo_id, req.depo.depo_id]);
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// NEW: API to get and set assignments
+app.get('/api/assignments/:depo_id', async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT product_id FROM product_assignments WHERE depo_id = ?', [req.params.depo_id]);
+    res.json(rows.map(r => r.product_id));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/assignments', async (req, res) => {
+  const { depo_id, product_ids } = req.body;
+  try {
+    await pool.query('DELETE FROM product_assignments WHERE depo_id = ?', [depo_id]);
+    if (product_ids.length > 0) {
+      const values = product_ids.map(pid => [depo_id, pid]);
+      await pool.query('INSERT INTO product_assignments (depo_id, product_id) VALUES ?', [values]);
+    }
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/products', async (req, res) => {
@@ -354,7 +387,10 @@ app.get('/', async (req, res) => {
                                     <td>${d.depo_id}</td>
                                     <td>${d.name}</td>
                                     <td><code style="background:#1e293b;padding:4px;border-radius:4px">${d.token}</code></td>
-                                    <td><button class="btn btn-danger" onclick="deleteDepo('${d.depo_id}')">Hapus</button></td>
+                                    <td>
+                                        <button class="btn btn-success" onclick="openAssignProducts('${d.depo_id}')">Atur Produk</button>
+                                        <button class="btn btn-danger" onclick="deleteDepo('${d.depo_id}')">Hapus</button>
+                                    </td>
                                 </tr>
                             `).join('')}
                         </tbody>
@@ -435,11 +471,21 @@ app.get('/', async (req, res) => {
         <div id="modal-overlay">
             <div class="modal">
                 <h3 id="modal-title">Edit Data</h3><br>
-                <input id="edit-id" type="hidden">
-                <input id="edit-field1">
-                <input id="edit-field2">
+                <div id="modal-body">
+                    <input id="edit-id" type="hidden">
+                    <input id="edit-field1">
+                    <input id="edit-field2">
+                </div>
+                <div id="assign-body" style="display:none; max-height: 300px; overflow-y: auto; margin-bottom: 1rem;">
+                    ${products.map(p => `
+                        <div style="display:flex; align-items:center; gap:10px; padding:8px; border-bottom:1px solid var(--glass-border)">
+                            <input type="checkbox" class="prod-check" value="${p.id}" style="width:20px; margin:0">
+                            <span>${p.name}</span>
+                        </div>
+                    `).join('')}
+                </div>
                 <div style="display:flex; gap:10px; margin-top:1rem;">
-                    <button class="btn btn-success" style="flex:1" onclick="saveEdit()">Simpan</button>
+                    <button class="btn btn-success" style="flex:1" id="btn-save" onclick="saveEdit()">Simpan</button>
                     <button class="btn btn-danger" style="flex:1" onclick="closeModal()">Batal</button>
                 </div>
             </div>
@@ -490,10 +536,41 @@ app.get('/', async (req, res) => {
 
             function openEditProduct(id, name, price) {
                 document.getElementById('modal-title').innerText = 'Edit Produk';
+                document.getElementById('modal-body').style.display = 'block';
+                document.getElementById('assign-body').style.display = 'none';
+                document.getElementById('btn-save').onclick = saveEdit;
                 document.getElementById('edit-id').value = id;
                 document.getElementById('edit-field1').value = name;
                 document.getElementById('edit-field2').value = price;
                 document.getElementById('modal-overlay').style.display = 'flex';
+            }
+
+            async function openAssignProducts(depoId) {
+                document.getElementById('modal-title').innerText = 'Pilih Produk untuk ' + depoId;
+                document.getElementById('modal-body').style.display = 'none';
+                document.getElementById('assign-body').style.display = 'block';
+                document.getElementById('edit-id').value = depoId;
+                document.getElementById('btn-save').onclick = saveAssignments;
+                
+                // Load current assignments
+                const res = await fetch('/api/assignments/' + depoId);
+                const assigned = await res.json();
+                document.querySelectorAll('.prod-check').forEach(cb => {
+                    cb.checked = assigned.includes(parseInt(cb.value));
+                });
+
+                document.getElementById('modal-overlay').style.display = 'flex';
+            }
+
+            async function saveAssignments() {
+                const depo_id = document.getElementById('edit-id').value;
+                const product_ids = Array.from(document.querySelectorAll('.prod-check:checked')).map(cb => cb.value);
+                const res = await fetch('/api/assignments', { 
+                    method: 'POST', 
+                    headers: { 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify({ depo_id, product_ids }) 
+                });
+                if(res.ok) location.reload();
             }
 
             async function saveEdit() {
