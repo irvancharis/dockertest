@@ -49,7 +49,7 @@ async function initDb() {
     isDbReady = true;
     console.log('Depo Database ready');
   } catch (err) {
-    console.log('Database not ready, retrying in 2s...');
+    console.error(`Database not ready (${err.message}), retrying in 2s...`);
     setTimeout(initDb, 2000);
   }
 }
