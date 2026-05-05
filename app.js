@@ -71,14 +71,10 @@ async function getLocalSetting(key) {
 }
 
 async function checkAuth(req, res, next) {
-  // Check if browser session exists
   if (req.signedCookies.auth === 'true') return next();
-
-  // Check if mobile token matches
   const mobileToken = req.headers['x-depo-token'];
   const storedToken = await getLocalSetting('depo_token');
   if (mobileToken && mobileToken === storedToken) return next();
-
   res.status(401).json({ error: 'Unauthorized' });
 }
 
@@ -94,7 +90,6 @@ app.get('/api/check-token', async (req, res) => {
   const storedToken = await getLocalSetting('depo_token');
   const depoId = await getLocalSetting('depo_id');
   const depoName = await getLocalSetting('depo_name');
-
   if (token === storedToken) {
     res.json({ success: true, depo_id: depoId, name: depoName });
   } else {
@@ -143,7 +138,18 @@ app.post('/api/login', async (req, res) => {
 
 app.post('/api/logout', (req, res) => { res.clearCookie('auth'); res.json({ success: true }); });
 app.get('/api/products', checkAuth, async (req, res) => { const [rows] = await pool.query('SELECT * FROM products'); res.json(rows); });
+
+// Modified: Add POST support for /api/sales to receive transactions from mobile app
 app.get('/api/sales', checkAuth, async (req, res) => { const [rows] = await pool.query('SELECT * FROM sales ORDER BY sale_date DESC'); res.json(rows); });
+app.post('/api/sales', checkAuth, async (req, res) => {
+  const { id, total_amount, sale_date } = req.body;
+  const depo_id = await getLocalSetting('depo_id');
+  try {
+    await pool.query('INSERT INTO sales (id, total_amount, sale_date, depo_id, synced) VALUES (?, ?, ?, ?, 0)', [id, total_amount, sale_date, depo_id]);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.get('/api/employees', checkAuth, async (req, res) => { const [rows] = await pool.query('SELECT * FROM employees'); res.json(rows); });
 app.post('/api/employees', checkAuth, async (req, res) => { const { name, username, password, position, phone } = req.body; await pool.query('INSERT INTO employees (name, username, password, position, phone) VALUES (?, ?, ?, ?, ?)', [name, username, password, position, phone]); res.json({ success: true }); });
 app.get('/api/sync-status', checkAuth, async (req, res) => { const [s] = await pool.query('SELECT COUNT(*) as count FROM sales WHERE synced = 0'); const [e] = await pool.query('SELECT COUNT(*) as count FROM employees WHERE synced = 0'); res.json({ unsynced_sales: s[0].count, unsynced_employees: e[0].count }); });
