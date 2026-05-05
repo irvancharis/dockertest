@@ -80,6 +80,8 @@ async function initDb() {
         id INT AUTO_INCREMENT PRIMARY KEY,
         depo_id VARCHAR(50),
         name VARCHAR(100) NOT NULL,
+        username VARCHAR(50),
+        password VARCHAR(255),
         position VARCHAR(50),
         phone VARCHAR(20),
         synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -217,8 +219,8 @@ app.post('/api/employees-sync', checkDepoToken, async (req, res) => {
     await pool.query('DELETE FROM employees WHERE depo_id = ?', [depo_id]);
     for (const e of employees) {
       await pool.query(
-        'INSERT INTO employees (depo_id, name, position, phone) VALUES (?, ?, ?, ?)',
-        [depo_id, e.name, e.position, e.phone]
+        'INSERT INTO employees (depo_id, name, username, password, position, phone) VALUES (?, ?, ?, ?, ?, ?)',
+        [depo_id, e.name, e.username, e.password, e.position, e.phone]
       );
     }
     res.json({ success: true });
@@ -432,12 +434,13 @@ app.get('/', async (req, res) => {
                 <div class="glass-panel">
                     <h2>Monitoring Karyawan (Synced from Spoke)</h2>
                     <table>
-                        <thead><tr><th>Cabang</th><th>Nama</th><th>Posisi</th><th>Telepon</th></tr></thead>
+                        <thead><tr><th>Cabang</th><th>Nama</th><th>Username</th><th>Posisi</th><th>Telepon</th></tr></thead>
                         <tbody>
                             ${employees.map(e => `
                                 <tr>
                                     <td><span class="badge">${e.depo_id}</span></td>
                                     <td>${e.name}</td>
+                                    <td>${e.username || '-'}</td>
                                     <td>${e.position}</td>
                                     <td>${e.phone}</td>
                                 </tr>
