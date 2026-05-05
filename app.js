@@ -237,7 +237,7 @@ app.get('/', (req, res) => {
                 const pt = document.querySelector('#products-table tbody'); pt.innerHTML = '';
                 products.forEach(p => pt.innerHTML += \`<tr><td>\${p.name}</td><td>Rp \${parseFloat(p.price).toLocaleString()}</td></tr>\`);
                 const et = document.querySelector('#emp-table tbody'); et.innerHTML = '';
-                (await er.json()).forEach(e => et.innerHTML += `<tr><td>${e.name}</td><td>${e.username || '-'}</td><td>${e.position}</td><td>${e.phone}</td></tr>`);
+                (await er.json()).forEach(e => et.innerHTML += \`<tr><td>\${e.name}</td><td>\${e.username || '-'}</td><td>\${e.position}</td><td>\${e.phone}</td></tr>\`);
                 lucide.createIcons();
             }
             async function addEmployee() {
