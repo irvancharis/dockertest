@@ -32,17 +32,13 @@ class ApiService {
   Future<bool> submitSale(String token, List<CartItem> items) async {
     final double totalAmount = items.fold(0, (sum, item) => sum + item.total);
     final saleData = {
-      'sales': [
-        {
-          'id': 'FLT-${DateTime.now().millisecondsSinceEpoch}',
-          'total_amount': totalAmount,
-          'sale_date': DateTime.now().toIso8601String(),
-        }
-      ]
+      'id': 'FLT-${DateTime.now().millisecondsSinceEpoch}',
+      'total_amount': totalAmount,
+      'sale_date': DateTime.now().toIso8601String(),
     };
 
     final response = await http.post(
-      Uri.parse('$baseUrl/api/receive-sync'),
+      Uri.parse('$baseUrl/api/sales'),
       headers: {
         'Content-Type': 'application/json',
         'X-Depo-Token': token,
