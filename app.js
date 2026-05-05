@@ -44,7 +44,7 @@ async function initDb() {
     
     await pool.query(`CREATE TABLE IF NOT EXISTS products (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255) NOT NULL, price DECIMAL(10, 2) NOT NULL, stock INT DEFAULT 0)`);
     await pool.query(`CREATE TABLE IF NOT EXISTS sales (id VARCHAR(36) PRIMARY KEY, total_amount DECIMAL(10, 2) NOT NULL, sale_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP, depo_id VARCHAR(50) NOT NULL, synced BOOLEAN DEFAULT FALSE)`);
-    await pool.query(`CREATE TABLE IF NOT EXISTS employees (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100) NOT NULL, position VARCHAR(50), phone VARCHAR(20), synced BOOLEAN DEFAULT FALSE)`);
+    await pool.query(`CREATE TABLE IF NOT EXISTS employees (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100) NOT NULL, username VARCHAR(50) UNIQUE, password VARCHAR(255), position VARCHAR(50), phone VARCHAR(20), synced BOOLEAN DEFAULT FALSE)`);
 
     isDbReady = true;
     console.log('Depo Database ready');
@@ -125,7 +125,7 @@ app.post('/api/logout', (req, res) => { res.clearCookie('auth'); res.json({ succ
 app.get('/api/products', checkAuth, async (req, res) => { const [rows] = await pool.query('SELECT * FROM products'); res.json(rows); });
 app.get('/api/sales', checkAuth, async (req, res) => { const [rows] = await pool.query('SELECT * FROM sales ORDER BY sale_date DESC'); res.json(rows); });
 app.get('/api/employees', checkAuth, async (req, res) => { const [rows] = await pool.query('SELECT * FROM employees'); res.json(rows); });
-app.post('/api/employees', checkAuth, async (req, res) => { const { name, position, phone } = req.body; await pool.query('INSERT INTO employees (name, position, phone) VALUES (?, ?, ?)', [name, position, phone]); res.json({ success: true }); });
+app.post('/api/employees', checkAuth, async (req, res) => { const { name, username, password, position, phone } = req.body; await pool.query('INSERT INTO employees (name, username, password, position, phone) VALUES (?, ?, ?, ?, ?)', [name, username, password, position, phone]); res.json({ success: true }); });
 app.get('/api/sync-status', checkAuth, async (req, res) => { const [s] = await pool.query('SELECT COUNT(*) as count FROM sales WHERE synced = 0'); const [e] = await pool.query('SELECT COUNT(*) as count FROM employees WHERE synced = 0'); res.json({ unsynced_sales: s[0].count, unsynced_employees: e[0].count }); });
 
 app.post('/api/sync-to-central', checkAuth, async (req, res) => {
@@ -210,7 +210,7 @@ app.get('/', (req, res) => {
             <header><h1 id="page-title">Dashboard</h1><p id="depo-info" style="color:var(--primary); font-weight: 600;"></p></header>
             <div id="section-dashboard"><div class="glass-panel"><h2>Transaksi Terakhir</h2><table id="sales-table"><thead><tr><th>ID</th><th>Total</th><th>Status</th></tr></thead><tbody></tbody></table></div></div>
             <div id="section-inventory" style="display:none"><div class="glass-panel" style="text-align:center"><button class="btn" onclick="syncMasterData()">Sync Produk dari Pusat</button></div><div class="glass-panel"><table id="products-table"><thead><tr><th>Nama</th><th>Harga</th></tr></thead><tbody></tbody></table></div></div>
-            <div id="section-employees" style="display:none"><div class="glass-panel"><h2>Input Karyawan</h2><input id="e-name" placeholder="Nama"><input id="e-pos" placeholder="Posisi"><input id="e-phone" placeholder="HP"><button class="btn" onclick="addEmployee()">Tambah</button></div><div class="glass-panel"><table id="emp-table"><thead><tr><th>Nama</th><th>Posisi</th><th>HP</th></tr></thead><tbody></tbody></table></div></div>
+            <div id="section-employees" style="display:none"><div class="glass-panel"><h2>Input Karyawan</h2><input id="e-name" placeholder="Nama"><input id="e-user" placeholder="Username"><input type="password" id="e-pass" placeholder="Password"><input id="e-pos" placeholder="Posisi"><input id="e-phone" placeholder="HP"><button class="btn" onclick="addEmployee()">Tambah</button></div><div class="glass-panel"><table id="emp-table"><thead><tr><th>Nama</th><th>Username</th><th>Posisi</th><th>HP</th></tr></thead><tbody></tbody></table></div></div>
         </div>
         <div id="notification"></div>
         <script>
@@ -237,12 +237,16 @@ app.get('/', (req, res) => {
                 const pt = document.querySelector('#products-table tbody'); pt.innerHTML = '';
                 products.forEach(p => pt.innerHTML += \`<tr><td>\${p.name}</td><td>Rp \${parseFloat(p.price).toLocaleString()}</td></tr>\`);
                 const et = document.querySelector('#emp-table tbody'); et.innerHTML = '';
-                (await er.json()).forEach(e => et.innerHTML += \`<tr><td>\${e.name}</td><td>\${e.position}</td><td>\${e.phone}</td></tr>\`);
+                (await er.json()).forEach(e => et.innerHTML += `<tr><td>${e.name}</td><td>${e.username || '-'}</td><td>${e.position}</td><td>${e.phone}</td></tr>`);
                 lucide.createIcons();
             }
             async function addEmployee() {
-                const name = document.getElementById('e-name').value; const position = document.getElementById('e-pos').value; const phone = document.getElementById('e-phone').value;
-                await fetch('/api/employees', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name, position, phone}) });
+                const name = document.getElementById('e-name').value; 
+                const username = document.getElementById('e-user').value;
+                const password = document.getElementById('e-pass').value;
+                const position = document.getElementById('e-pos').value; 
+                const phone = document.getElementById('e-phone').value;
+                await fetch('/api/employees', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name, username, password, position, phone}) });
                 fetchData(); notify('Berhasil', 'success');
             }
             async function syncData() { notify('Syncing...', 'warning'); await fetch('/api/sync-to-central', {method:'POST'}); fetchData(); notify('Success!', 'success'); }
