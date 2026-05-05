@@ -86,7 +86,7 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
             ),
             TextButton(
-              onPressed: () => sales.logout(),
+              onPressed: () => sales.resetActivation(),
               child: const Text('Reset Aktivasi Device', style: TextStyle(color: Colors.red)),
             )
           ],

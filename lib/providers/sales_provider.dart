@@ -140,7 +140,21 @@ class SalesProvider with ChangeNotifier {
   }
 
   void logout() async {
+    _loggedInUser = null;
+    _userPosition = null;
+    _cart.clear();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('logged_in_user');
+    await prefs.remove('user_position');
+    notifyListeners();
+  }
+
+  Future<void> resetActivation() async {
     _token = null;
+    _depoName = null;
+    _depoId = null;
+    _loggedInUser = null;
+    _userPosition = null;
     _cart.clear();
     final prefs = await SharedPreferences.getInstance();
     await prefs.clear();
