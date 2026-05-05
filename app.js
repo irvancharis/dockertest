@@ -14,6 +14,12 @@ app.use(bodyParser.json());
 app.use(cookieParser('secret-key'));
 app.use(express.static('public'));
 
+// Debug middleware to log ALL requests
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+  next();
+});
+
 const dbConfig = {
   host: process.env.DB_HOST || 'localhost',
   user: process.env.DB_USER || 'root',
@@ -72,11 +78,16 @@ async function getLocalSetting(key) {
 
 async function checkAuth(req, res, next) {
   if (req.signedCookies.auth === 'true') return next();
+  
   const mobileToken = req.headers['x-depo-token'];
   const storedToken = await getLocalSetting('depo_token');
+  
   if (mobileToken && mobileToken === storedToken) return next();
   
-  console.log('Auth Failed: No cookie and token mismatch. Received:', mobileToken, 'Expected:', storedToken);
+  console.log('Auth Failed for', req.url);
+  console.log(' - Mobile Token from Header:', mobileToken);
+  console.log(' - Stored Token in DB:', storedToken);
+  
   res.status(401).json({ error: 'Unauthorized' });
 }
 
@@ -146,7 +157,6 @@ app.post('/api/sales', checkAuth, async (req, res) => {
   const { id, total_amount, sale_date } = req.body;
   const depo_id = await getLocalSetting('depo_id');
   try {
-    // Format date for MySQL if provided, otherwise use NOW()
     const finalDate = sale_date ? new Date(sale_date).toISOString().slice(0, 19).replace('T', ' ') : new Date().toISOString().slice(0, 19).replace('T', ' ');
     await pool.query('INSERT INTO sales (id, total_amount, sale_date, depo_id, synced) VALUES (?, ?, ?, ?, 0)', [id, total_amount, finalDate, depo_id]);
     res.json({ success: true });
