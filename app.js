@@ -84,6 +84,20 @@ app.get('/api/config', async (req, res) => {
   res.json({ activated: !!depo_id, depo_id, depo_name, authenticated });
 });
 
+// NEW: Endpoint for mobile app activation check
+app.get('/api/check-token', async (req, res) => {
+  const { token } = req.query;
+  const storedToken = await getLocalSetting('depo_token');
+  const depoId = await getLocalSetting('depo_id');
+  const depoName = await getLocalSetting('depo_name');
+
+  if (token === storedToken) {
+    res.json({ success: true, depo_id: depoId, name: depoName });
+  } else {
+    res.status(403).json({ error: 'Token Invalid' });
+  }
+});
+
 app.post('/api/activate', async (req, res) => {
   const { token } = req.body;
   const centralBaseUrl = (process.env.CENTRAL_URL || 'http://web-pusat:4000/api/receive-sync').replace('/api/receive-sync', '');
