@@ -1,12 +1,16 @@
 const express = require('express');
 const mysql = require('mysql2/promise');
 const crypto = require('crypto');
+const cors = require('cors');
 const app = express();
+
 const port = 4000;
 
 app.use(express.json());
+app.use(cors());
 
 const dbConfig = {
+
   host: process.env.DB_HOST || 'localhost',
   user: process.env.DB_USER || 'root',
   password: process.env.DB_PASS || 'rootpassword',
@@ -80,6 +84,8 @@ async function initDb() {
         id INT AUTO_INCREMENT PRIMARY KEY,
         depo_id VARCHAR(50),
         name VARCHAR(100) NOT NULL,
+        username VARCHAR(20) UNIQUE,
+        password VARCHAR(100),
         position VARCHAR(50),
         phone VARCHAR(20),
         synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -213,15 +219,31 @@ app.post('/api/employees-sync', checkDepoToken, async (req, res) => {
   const { employees } = req.body;
   const depo_id = req.depo.depo_id;
   try {
-    // Delete old employee records for this depo before sync (Full sync)
     await pool.query('DELETE FROM employees WHERE depo_id = ?', [depo_id]);
     for (const e of employees) {
+      // Auto-generate username if not provided
+      let username = e.username;
+      if (!username) {
+        const cleanName = e.name.toLowerCase().replace(/[^a-z]/g, '').slice(0, 5);
+        const randomCode = Math.floor(100 + Math.random() * 899);
+        username = (cleanName + randomCode).padEnd(8, '0').slice(0, 8);
+      }
+      
       await pool.query(
-        'INSERT INTO employees (depo_id, name, position, phone) VALUES (?, ?, ?, ?)',
-        [depo_id, e.name, e.position, e.phone]
+        'INSERT INTO employees (depo_id, name, username, password, position, phone) VALUES (?, ?, ?, ?, ?, ?)',
+        [depo_id, e.name, username, e.password || '123456', e.position, e.phone]
       );
     }
     res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/employees', checkDepoToken, async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT name, username, password, position FROM employees WHERE depo_id = ?', [req.depo.depo_id]);
+    res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
