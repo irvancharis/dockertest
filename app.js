@@ -71,10 +71,15 @@ async function getLocalSetting(key) {
 }
 
 async function checkAuth(req, res, next) {
-  const depo_id = await getLocalSetting('depo_id');
-  if (!depo_id) return next();
-  if (req.signedCookies.auth === 'true') next();
-  else res.status(401).json({ error: 'Unauthorized' });
+  // Check if browser session exists
+  if (req.signedCookies.auth === 'true') return next();
+
+  // Check if mobile token matches
+  const mobileToken = req.headers['x-depo-token'];
+  const storedToken = await getLocalSetting('depo_token');
+  if (mobileToken && mobileToken === storedToken) return next();
+
+  res.status(401).json({ error: 'Unauthorized' });
 }
 
 app.get('/api/config', async (req, res) => {
@@ -84,7 +89,6 @@ app.get('/api/config', async (req, res) => {
   res.json({ activated: !!depo_id, depo_id, depo_name, authenticated });
 });
 
-// NEW: Endpoint for mobile app activation check
 app.get('/api/check-token', async (req, res) => {
   const { token } = req.query;
   const storedToken = await getLocalSetting('depo_token');
