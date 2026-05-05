@@ -45,6 +45,8 @@ async function initDb() {
     await pool.query(`CREATE TABLE IF NOT EXISTS products (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255) NOT NULL, price DECIMAL(10, 2) NOT NULL, stock INT DEFAULT 0)`);
     await pool.query(`CREATE TABLE IF NOT EXISTS sales (id VARCHAR(36) PRIMARY KEY, total_amount DECIMAL(10, 2) NOT NULL, sale_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP, depo_id VARCHAR(50) NOT NULL, synced BOOLEAN DEFAULT FALSE)`);
     await pool.query(`CREATE TABLE IF NOT EXISTS employees (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100) NOT NULL, username VARCHAR(50) UNIQUE, password VARCHAR(255), position VARCHAR(50), phone VARCHAR(20), synced BOOLEAN DEFAULT FALSE)`);
+    try { await pool.query(`ALTER TABLE employees ADD COLUMN username VARCHAR(50) UNIQUE AFTER name`); } catch (e) {}
+    try { await pool.query(`ALTER TABLE employees ADD COLUMN password VARCHAR(255) AFTER username`); } catch (e) {}
 
     isDbReady = true;
     console.log('Depo Database ready');
