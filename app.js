@@ -75,6 +75,8 @@ async function checkAuth(req, res, next) {
   const mobileToken = req.headers['x-depo-token'];
   const storedToken = await getLocalSetting('depo_token');
   if (mobileToken && mobileToken === storedToken) return next();
+  
+  console.log('Auth Failed: No cookie and token mismatch. Received:', mobileToken, 'Expected:', storedToken);
   res.status(401).json({ error: 'Unauthorized' });
 }
 
@@ -139,15 +141,19 @@ app.post('/api/login', async (req, res) => {
 app.post('/api/logout', (req, res) => { res.clearCookie('auth'); res.json({ success: true }); });
 app.get('/api/products', checkAuth, async (req, res) => { const [rows] = await pool.query('SELECT * FROM products'); res.json(rows); });
 
-// Modified: Add POST support for /api/sales to receive transactions from mobile app
 app.get('/api/sales', checkAuth, async (req, res) => { const [rows] = await pool.query('SELECT * FROM sales ORDER BY sale_date DESC'); res.json(rows); });
 app.post('/api/sales', checkAuth, async (req, res) => {
   const { id, total_amount, sale_date } = req.body;
   const depo_id = await getLocalSetting('depo_id');
   try {
-    await pool.query('INSERT INTO sales (id, total_amount, sale_date, depo_id, synced) VALUES (?, ?, ?, ?, 0)', [id, total_amount, sale_date, depo_id]);
+    // Format date for MySQL if provided, otherwise use NOW()
+    const finalDate = sale_date ? new Date(sale_date).toISOString().slice(0, 19).replace('T', ' ') : new Date().toISOString().slice(0, 19).replace('T', ' ');
+    await pool.query('INSERT INTO sales (id, total_amount, sale_date, depo_id, synced) VALUES (?, ?, ?, ?, 0)', [id, total_amount, finalDate, depo_id]);
     res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { 
+    console.error('Error submitting sale:', err);
+    res.status(500).json({ error: err.message }); 
+  }
 });
 
 app.get('/api/employees', checkAuth, async (req, res) => { const [rows] = await pool.query('SELECT * FROM employees'); res.json(rows); });
