@@ -188,7 +188,10 @@ app.post('/api/sync-to-central', checkAuth, async (req, res) => {
 
 app.post('/api/sync-products-from-central', checkAuth, async (req, res) => {
   const depo_token = await getLocalSetting('depo_token');
-  const r = await fetch((process.env.CENTRAL_URL || 'http://web-pusat:4000/api/receive-sync').replace('/receive-sync', '/products'), { headers: { 'X-Depo-Token': depo_token } });
+  const centralBaseUrl = (process.env.CENTRAL_URL || 'http://web-pusat:4000/api/receive-sync').replace('/receive-sync', '');
+  
+  // Sync Products
+  const r = await fetch(`${centralBaseUrl}/api/products`, { headers: { 'X-Depo-Token': depo_token } });
   const products = await r.json();
   
   const incomingIds = products.map(p => p.id);
@@ -198,8 +201,32 @@ app.post('/api/sync-products-from-central', checkAuth, async (req, res) => {
     await pool.query('DELETE FROM products');
   }
 
-  for (const p of products) await pool.query('INSERT INTO products (id, name, price) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE name=VALUES(name), price=VALUES(price)', [p.id, p.name, p.price]);
+  for (const p of products) {
+    await pool.query('INSERT INTO products (id, name, price) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE name=VALUES(name), price=VALUES(price)', [p.id, p.name, p.price]);
+  }
+
+  // NEW: Sync App Version from Pusat
+  try {
+    const vr = await fetch(`${centralBaseUrl}/api/version`);
+    if (vr.ok) {
+      const version = await vr.json();
+      await pool.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['latest_version', JSON.stringify(version)]);
+    }
+  } catch (err) {
+    console.error('Failed to sync app version:', err.message);
+  }
+
   res.json({ success: true });
+});
+
+// NEW: API for Mobile to check latest version
+app.get('/api/app-version', async (req, res) => {
+  const versionStr = await getLocalSetting('latest_version');
+  if (versionStr) {
+    res.json(JSON.parse(versionStr));
+  } else {
+    res.json({ version_code: 0, version_name: '0.0.0' });
+  }
 });
 
 app.get('/', (req, res) => {
