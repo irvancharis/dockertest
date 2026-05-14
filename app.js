@@ -99,6 +99,20 @@ async function initDb() {
       )
     `);
 
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS app_versions (
+        id INT PRIMARY KEY DEFAULT 1,
+        version_code INT NOT NULL,
+        version_name VARCHAR(50) NOT NULL,
+        is_force_update BOOLEAN DEFAULT FALSE,
+        release_notes TEXT,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON DUPLICATE KEY UPDATE updated_at = CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Initialize version if not exists
+    await pool.query('INSERT IGNORE INTO app_versions (id, version_code, version_name) VALUES (1, 1, "1.0.0")');
+
     isDbReady = true;
     console.log('Central Database ready');
   } catch (err) {
@@ -263,6 +277,29 @@ app.get('/api/check-token', async (req, res) => {
   }
 });
 
+// NEW: API for App Version Management
+app.get('/api/version', async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT * FROM app_versions WHERE id = 1');
+    res.json(rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/version', async (req, res) => {
+  const { version_code, version_name, is_force_update, release_notes } = req.body;
+  try {
+    await pool.query(
+      'INSERT INTO app_versions (id, version_code, version_name, is_force_update, release_notes) VALUES (1, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE version_code=VALUES(version_code), version_name=VALUES(version_name), is_force_update=VALUES(is_force_update), release_notes=VALUES(release_notes)',
+      [version_code, version_name, is_force_update ? 1 : 0, release_notes]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // UI Route (Admin Panel)
 app.get('/', async (req, res) => {
   if (!isDbReady) return res.send('Database connecting...');
@@ -275,6 +312,7 @@ app.get('/', async (req, res) => {
   `);
   const [sales] = await pool.query('SELECT * FROM sales_central ORDER BY sale_date DESC LIMIT 50');
   const [employees] = await pool.query('SELECT * FROM employees');
+  const [version] = await pool.query('SELECT * FROM app_versions WHERE id = 1');
 
   res.send(`
     <!DOCTYPE html>
@@ -329,6 +367,7 @@ app.get('/', async (req, res) => {
             <div class="nav-item" onclick="showSection('products')"><i data-lucide="package"></i> Master Produk</div>
             <div class="nav-item" onclick="showSection('employees')"><i data-lucide="users"></i> Karyawan</div>
             <div class="nav-item" onclick="showSection('sales')"><i data-lucide="bar-chart-3"></i> Penjualan</div>
+            <div class="nav-item" onclick="showSection('updates')"><i data-lucide="upload-cloud"></i> Management Update</div>
         </nav>
 
         <div class="main">
@@ -468,6 +507,30 @@ app.get('/', async (req, res) => {
                     </table>
                 </div>
             </div>
+
+            <div id="section-updates" style="display:none">
+                <div class="glass-panel">
+                    <h2>Input Versi Terbaru</h2>
+                    <p style="color: var(--text-muted); margin-bottom: 1.5rem;">User mobile akan menerima notifikasi update saat melakukan sync ke depo.</p>
+                    <div style="max-width: 500px;">
+                        <label class="stat-label">Version Name (e.g. 1.0.1)</label>
+                        <input id="v-name" value="${version[0]?.version_name || ''}" placeholder="1.0.1">
+                        
+                        <label class="stat-label">Version Code (Must be higher than previous)</label>
+                        <input id="v-code" type="number" value="${version[0]?.version_code || ''}" placeholder="2">
+                        
+                        <label class="stat-label">Release Notes</label>
+                        <textarea id="v-notes" style="background: rgba(15, 23, 42, 0.5); border: 1px solid var(--glass-border); padding: 10px; border-radius: 8px; color: white; width: 100%; margin-bottom: 1rem; font-family: inherit; height: 100px;">${version[0]?.release_notes || ''}</textarea>
+                        
+                        <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 1.5rem;">
+                            <input type="checkbox" id="v-force" style="width: 20px; margin: 0;" ${version[0]?.is_force_update ? 'checked' : ''}>
+                            <label for="v-force">Force Update (User must update to continue)</label>
+                        </div>
+                        
+                        <button class="btn btn-success" onclick="updateAppVersion()">Publish Update</button>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <!-- Modals -->
@@ -496,8 +559,9 @@ app.get('/', async (req, res) => {
 
         <script>
             function showSection(name) {
-                ['dashboard', 'depos', 'products', 'employees', 'sales'].forEach(s => {
-                    document.getElementById('section-' + s).style.display = s === name ? 'block' : 'none';
+                ['dashboard', 'depos', 'products', 'employees', 'sales', 'updates'].forEach(s => {
+                    const el = document.getElementById('section-' + s);
+                    if (el) el.style.display = s === name ? 'block' : 'none';
                 });
                 document.querySelectorAll('.nav-item').forEach(i => {
                     i.classList.toggle('active', i.innerText.toLowerCase().includes(name));
@@ -582,6 +646,28 @@ app.get('/', async (req, res) => {
                 const price = document.getElementById('edit-field2').value;
                 const res = await fetch('/api/products/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, price }) });
                 if(res.ok) location.reload();
+            }
+
+            async function updateAppVersion() {
+                const version_name = document.getElementById('v-name').value;
+                const version_code = parseInt(document.getElementById('v-code').value);
+                const release_notes = document.getElementById('v-notes').value;
+                const is_force_update = document.getElementById('v-force').checked;
+
+                if (!version_name || !version_code) return alert('Version name and code are required');
+
+                const res = await fetch('/api/version', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ version_name, version_code, release_notes, is_force_update })
+                });
+
+                if (res.ok) {
+                    alert('Update published successfully!');
+                    location.reload();
+                } else {
+                    alert('Failed to publish update');
+                }
             }
 
             function closeModal() { document.getElementById('modal-overlay').style.display = 'none'; }
