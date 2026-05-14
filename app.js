@@ -191,7 +191,7 @@ app.post('/api/sync-products-from-central', checkAuth, async (req, res) => {
   const centralBaseUrl = (process.env.CENTRAL_URL || 'http://web-pusat:4000/api/receive-sync').replace('/receive-sync', '');
   
   // Sync Products
-  const r = await fetch(`${centralBaseUrl}/api/products`, { headers: { 'X-Depo-Token': depo_token } });
+  const r = await fetch(`${centralBaseUrl}/products`, { headers: { 'X-Depo-Token': depo_token } });
   const products = await r.json();
   
   const incomingIds = products.map(p => p.id);
@@ -207,7 +207,7 @@ app.post('/api/sync-products-from-central', checkAuth, async (req, res) => {
 
   // NEW: Sync App Version from Pusat
   try {
-    const vr = await fetch(`${centralBaseUrl}/api/version`);
+    const vr = await fetch(`${centralBaseUrl}/version`);
     if (vr.ok) {
       const version = await vr.json();
       await pool.query('INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)', ['latest_version', JSON.stringify(version)]);
