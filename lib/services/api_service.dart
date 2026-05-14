@@ -60,4 +60,13 @@ class ApiService {
       throw Exception('Gagal memuat data karyawan');
     }
   }
+
+  Future<Map<String, dynamic>> getLatestVersion() async {
+    final response = await http.get(Uri.parse('$baseUrl/api/app-version'));
+    if (response.statusCode == 200) {
+      return json.decode(response.body);
+    } else {
+      throw Exception('Gagal memuat info versi');
+    }
+  }
 }

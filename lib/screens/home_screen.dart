@@ -3,13 +3,95 @@ import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import '../providers/sales_provider.dart';
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  bool _dialogShown = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkUpdate();
+    });
+  }
+
+  void _checkUpdate() {
+    final sales = Provider.of<SalesProvider>(context, listen: false);
+    if (sales.updateInfo != null && !_dialogShown) {
+      _showUpdateDialog(sales.updateInfo!);
+      _dialogShown = true;
+    }
+  }
+
+  void _showUpdateDialog(Map<String, dynamic> info) {
+    final isForce = info['is_force_update'] == 1 || info['is_force_update'] == true;
+    
+    showDialog(
+      context: context,
+      barrierDismissible: !isForce,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF1E293B),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+        title: Row(
+          children: [
+            const Icon(Icons.system_update, color: Color(0xFF6366F1)),
+            const SizedBox(width: 12),
+            const Text('Update Tersedia'),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Versi baru ${info['version_name']} telah dirilis.', style: const TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 12),
+            const Text('Apa yang baru:', style: TextStyle(fontSize: 12, color: Colors.grey)),
+            Text(info['release_notes'] ?? 'Peningkatan performa dan perbaikan bug.'),
+            if (isForce) ...[
+              const SizedBox(height: 16),
+              const Text('Update ini wajib dilakukan untuk melanjutkan penggunaan aplikasi.', style: TextStyle(color: Colors.redAccent, fontSize: 12)),
+            ]
+          ],
+        ),
+        actions: [
+          if (!isForce)
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('NANTI', style: TextStyle(color: Colors.grey)),
+            ),
+          ElevatedButton(
+            onPressed: () {
+              // In real app, launch URL to download APK
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Mengunduh update...')));
+              if (!isForce) Navigator.pop(context);
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF6366F1),
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            ),
+            child: const Text('UPDATE SEKARANG'),
+          ),
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     final sales = Provider.of<SalesProvider>(context);
     final currencyFormat = NumberFormat.currency(locale: 'id', symbol: 'Rp ', decimalDigits: 0);
+
+    // Re-check update if state changes (e.g. after sync)
+    if (sales.updateInfo != null && !_dialogShown) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _checkUpdate());
+    }
 
     return Scaffold(
       appBar: AppBar(

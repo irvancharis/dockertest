@@ -3,6 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/product.dart';
 import '../services/api_service.dart';
 import '../services/database_service.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 class SalesProvider with ChangeNotifier {
   String? _token;
@@ -14,6 +15,7 @@ class SalesProvider with ChangeNotifier {
   List<Product> _products = [];
   List<CartItem> _cart = [];
   bool _isLoading = false;
+  Map<String, dynamic>? _updateInfo;
 
   String? get token => _token;
   String? get depoName => _depoName;
@@ -23,6 +25,7 @@ class SalesProvider with ChangeNotifier {
   List<Product> get products => _products;
   List<CartItem> get cart => _cart;
   bool get isLoading => _isLoading;
+  Map<String, dynamic>? get updateInfo => _updateInfo;
   double get totalAmount => _cart.fold(0, (sum, item) => sum + item.total);
 
   ApiService get _api => ApiService(_baseUrl);
@@ -38,6 +41,24 @@ class SalesProvider with ChangeNotifier {
     
     if (_token != null) {
       fetchProducts();
+      checkVersion();
+    }
+  }
+
+  Future<void> checkVersion() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      final currentVersionCode = int.parse(info.buildNumber);
+      
+      final latest = await _api.getLatestVersion();
+      final latestVersionCode = latest['version_code'] as int;
+      
+      if (latestVersionCode > currentVersionCode) {
+        _updateInfo = latest;
+        notifyListeners();
+      }
+    } catch (e) {
+      print('Check version error: $e');
     }
   }
 
@@ -97,6 +118,7 @@ class SalesProvider with ChangeNotifier {
     notifyListeners();
     try {
       _products = await _api.getProducts(_token!);
+      await checkVersion();
     } catch (e) {
       print('Error fetching products: $e');
     } finally {
